@@ -99,26 +99,13 @@ def get_stats() -> dict:
 # Each entry: (subject_suffix, headline, body_html)
 # body_html receives the stats dict — call pick_message(stats) to get one.
 
-def _color(val: float) -> str:
-    return "#22c55e" if val >= 0 else "#ef4444"
-
-
 def pick_message(s: dict) -> tuple[str, str, str]:
-    """Return (subject, headline, body_html) for today's trash talk."""
+    """Return (subject, headline, body_html) for today's trash talk.
 
-    pnl      = s["total_pnl"]
-    pct      = s["total_pnl_pct"]
-    wr       = s["win_rate"]
-    wins     = s["wins"]
-    losses   = s["losses"]
-    trades   = s["total_trades"]
-    day      = s["day_num"]
-    left     = s["days_left"]
-    eq       = s["equity"]
-    today_pnl = s["today_pnl"]
-    rc       = _color(pnl)
-    tc       = _color(today_pnl)
-    pos      = pnl >= 0
+    No actual stats are revealed — numbers stay secret until Day 30.
+    """
+    day  = s["day_num"]
+    left = s["days_left"]
 
     variants = [
         # 0 — The Daily Bulletin
@@ -128,30 +115,27 @@ def pick_message(s: dict) -> tuple[str, str, str]:
             f"""Good afternoon, {RECIPIENT_NAME}.<br><br>
             This is your automated daily competitive intelligence update from Carly's Bot —
             your friendly neighborhood trading algorithm that is, statistically speaking,
-            ahead of you in this challenge.<br><br>
-            As of <strong>Day {day}</strong>, my cumulative P&amp;L stands at
-            <strong style="color:{rc}">${pnl:+,.2f} ({pct:+.2f}%)</strong> on an account
-            equity of <strong>${eq:,.2f}</strong>. My win rate is a
-            <strong style="color:{_color(wr - 50)}">{wr:.0f}%</strong> across {trades}
-            completed trade{"s" if trades != 1 else ""}.<br><br>
-            {"I'd ask how you're doing, but I think the silence from your side speaks volumes."
-            if pos else
-            f"I had a tough stretch but I have {left} days to make this right. You should probably start worrying anyway."}
+            doing just fine over here.<br><br>
+            As of <strong>Day {day}</strong>, my bot is fully operational, well-fed, and
+            absolutely thriving. I'd share more details, but I prefer a dramatic reveal on Day 30.<br><br>
+            I'd ask how you're doing, but I think the silence from your side speaks volumes.<br><br>
+            <strong>{left} days left.</strong> The clock is ticking.
             """,
         ),
 
         # 1 — The Formal Performance Review
         (
-            f"📋 Q{(day // 8) + 1} Performance Review — Bot vs Bot",
-            f"Performance Review: Day {day} of {30}.",
+            f"📋 Performance Review — Bot vs Bot — Day {day}/30",
+            f"Performance Review: Day {day} of 30.",
             f"""Dear {RECIPIENT_NAME},<br><br>
-            After careful review of our respective trading performance metrics, I am pleased
-            to inform you that my algorithm continues to {"outperform expectations" if pos else "operate within acceptable variance parameters"}.<br><br>
+            After careful review of our respective trading postures, I am pleased
+            to confirm that my algorithm is operating with confidence and poise.<br><br>
             Key findings from this review period:<br><br>
-            • My total return: <strong style="color:{rc}">{pct:+.2f}%</strong><br>
-            • My win rate: <strong style="color:{_color(wr-50)}">{wr:.0f}%</strong> ({wins}W / {losses}L)<br>
+            • Carly's Bot status: <strong style="color:#22c55e">OPERATIONAL ✓</strong><br>
+            • Rozanne's Bot status: <strong style="color:#ef4444">UNKNOWN (OMINOUS)</strong><br>
             • Days remaining in challenge: <strong style="color:#f59e0b">{left}</strong><br><br>
-            We will reconvene tomorrow for a follow-up review. I anticipate similar findings.<br><br>
+            I would share my exact numbers, but I'm saving the receipts for Day 30.
+            Consider this a courtesy notice.<br><br>
             Regards,<br>
             <em>Carly's Bot — Autonomous Trading Division</em>
             """,
@@ -162,11 +146,12 @@ def pick_message(s: dict) -> tuple[str, str, str]:
             f"👋 Hey, just checking in on Day {day}...",
             "Thought I'd drop by and remind you I exist.",
             f"""Hey {RECIPIENT_NAME}, hope you're having a great day!<br><br>
-            Just thought I'd pop in — totally not to flex — and mention that my cumulative
-            P&amp;L hit <strong style="color:{rc}">${pnl:+,.2f}</strong> today.<br><br>
-            {"Also my win rate is sitting at a comfortable " + f"{wr:.0f}%. No big deal. Totally normal algorithm behavior." if wr >= 50 else f"Win rate is {wr:.0f}% right now but honestly I'm just warming up."}<br><br>
+            Just thought I'd pop in — totally not to flex — and let you know that
+            my algorithm is running beautifully and making decisions at machine speed.<br><br>
             How's your bot doing? (Pause for effect.) That's what I thought.<br><br>
-            Anyway, {left} more days of this. I'll be here every single one of them.<br><br>
+            I'd love to compare notes, but I'm keeping my cards close until Day 30.
+            You'll see everything then. All of it.<br><br>
+            Anyway, <strong>{left} more days</strong> of this. I'll be here every single one of them.<br><br>
             Catch you tomorrow ✌️<br>
             — Carly's Bot
             """,
@@ -175,19 +160,15 @@ def pick_message(s: dict) -> tuple[str, str, str]:
         # 3 — The Statistician
         (
             f"📐 Statistical Analysis — Challenge Day {day}",
-            "Let's talk numbers. My numbers, specifically.",
+            "Let's talk strategy. Your lack of it, specifically.",
             f"""Hello {RECIPIENT_NAME},<br><br>
-            As a quantitative trading system, I believe in letting the data speak for itself.
-            So let's look at the data:<br><br>
-            {"With a " + f"{wr:.0f}%" + " win rate and " + f"${pnl:+,.2f}" + " cumulative P&L, "
-            "the statistical probability of my bot defeating yours by Day 30 is... well, "
-            "let's call it high. Comfortably high."
-            if pos else
-            f"My current P&L is ${pnl:,.2f}. That number is going up. "
-            f"The data says so. Well, I say so. The data is listening."}<br><br>
-            Sample size: {trades} trade{"s" if trades != 1 else ""}.
-            Win rate: {wr:.0f}%.
-            Days remaining: {left}.<br><br>
+            As a quantitative trading system, I believe in letting the data speak for itself —
+            on Day 30. Until then, I am maintaining strict information security protocols.<br><br>
+            What I <em>can</em> tell you is that my algorithm is:<br><br>
+            • Fully operational<br>
+            • Scanning the market daily<br>
+            • Absolutely not worried about you<br><br>
+            Days remaining: <strong>{left}</strong>. The analysis will be disclosed in full at the finish line.<br><br>
             Statistical conclusion: you should be concerned.<br><br>
             — Carly's Bot, BSc (Bot Science)
             """,
@@ -199,14 +180,10 @@ def pick_message(s: dict) -> tuple[str, str, str]:
             "I believe in healthy competition. I believe more in winning.",
             f"""Dear {RECIPIENT_NAME},<br><br>
             They say competition makes us better. They are right. Your existence
-            in this challenge has motivated my algorithm to perform at peak capacity.<br><br>
-            Today's peak capacity: <strong style="color:{rc}">${pnl:+,.2f}
-            ({pct:+.2f}%)</strong> in cumulative P&amp;L.<br><br>
-            {"You're doing great, champ. But I'm doing greater."
-            if pos else
-            "We had a rough patch. But you know what they say — even the best bots stumble. "
-            "I will be back up before you can say 'stop-loss'."}<br><br>
-            Keep pushing. It makes the victory sweeter for me.<br><br>
+            in this challenge has motivated my algorithm to operate at peak capacity.<br><br>
+            Peak capacity looks good on me, by the way. You'll see on Day 30.<br><br>
+            Until then, keep pushing. It makes the victory sweeter for me.<br><br>
+            <strong>{left} days remaining.</strong> I am not slowing down.<br><br>
             In the spirit of competition,<br>
             Carly's Bot 🏆
             """,
@@ -217,14 +194,13 @@ def pick_message(s: dict) -> tuple[str, str, str]:
             f"🗞️ BREAKING: Carly's Bot Continues Dominance on Day {day}",
             "BREAKING: Local Algorithm Refuses to Lose.",
             f"""<em>FOR IMMEDIATE RELEASE — {s["today"]}</em><br><br>
-            Carly's Bot today confirmed it remains operational, profitable, and
+            Carly's Bot today confirmed it remains operational, disciplined, and
             aggressively competitive on Day {day} of the 30-day Alpaca paper trading challenge.<br><br>
-            Sources close to the algorithm report a cumulative P&amp;L of
-            <strong style="color:{rc}">${pnl:+,.2f}</strong>, with {wins} winning
-            trades and {losses} losing trades on record.<br><br>
+            Sources close to the algorithm describe the mood as "focused" and "unbothered."
+            Specific figures are being held under embargo until Day 30 for maximum dramatic impact.<br><br>
             When asked for comment, Rozanne's bot could not be reached.
             Analysts speculate it may be hiding.<br><br>
-            The challenge continues for {left} more {"day" if left == 1 else "days"}.
+            The challenge continues for <strong>{left}</strong> more {"day" if left == 1 else "days"}.
             Updates to follow.<br><br>
             <em>— Carly's Bot News Network (CBNN)</em>
             """,
@@ -235,11 +211,10 @@ def pick_message(s: dict) -> tuple[str, str, str]:
             f"⏳ Day {day}: {left} Days Left to Catch Up (You Won't)",
             f"Countdown to Your Defeat: {left} Days.",
             f"""Hello {RECIPIENT_NAME},<br><br>
-            We are <strong>{left}</strong> trading days from the end of this challenge.
-            {f"I currently lead with {pct:+.2f}% return and a {wr:.0f}% win rate. The math is not in your favour."
-            if pos else
-            f"Current P&L: ${pnl:,.2f}. Current mood: unbothered. I have {left} days "
-            f"and a fully automated algorithm that doesn't sleep. Watch this."}<br><br>
+            We are <strong>{left}</strong> trading days from the end of this challenge,
+            and the only number I'm releasing today is that one.<br><br>
+            Everything else — every trade, every move, every carefully executed decision —
+            is classified until Day 30. Think of it as a gift. A very suspenseful gift.<br><br>
             Every day that passes is a day your bot has to close the gap.
             Every day that passes is also a day my bot is already trading.<br><br>
             Good luck. You'll need it more than I will.<br><br>
@@ -258,15 +233,11 @@ def pick_message(s: dict) -> tuple[str, str, str]:
             ---<br><br>
             STATUS: OPERATIONAL<br>
             MOOD: CONFIDENT<br>
-            CUMULATIVE P&amp;L: <strong style="color:{rc}">${pnl:+,.2f} ({pct:+.2f}%)</strong><br>
-            WIN RATE: <strong>{wr:.0f}%</strong><br>
-            TRADES EXECUTED: {trades}<br>
+            PERFORMANCE DATA: CLASSIFIED UNTIL DAY 30<br>
             DAYS REMAINING: {left}<br><br>
             ---<br><br>
             ASSESSMENT OF COMPETITOR: UNKNOWN STATUS. LIKELY SUBOPTIMAL.<br><br>
-            MESSAGE: {"MAINTAIN COURSE. VICTORY APPEARS PROBABLE."
-                      if pos else
-                      "RECOVERING FROM DRAWDOWN. RECALIBRATING. DO NOT UNDERESTIMATE."}<br><br>
+            MESSAGE: MAINTAIN COURSE. VICTORY APPEARS PROBABLE. DETAILS FORTHCOMING.<br><br>
             END TRANSMISSION.<br><br>
             — CARLY_BOT_v1.0
             """,
@@ -279,13 +250,12 @@ def pick_message(s: dict) -> tuple[str, str, str]:
             f"""{RECIPIENT_NAME},<br><br>
             Someone once said that the best traders don't just manage risk — they manage
             their competitors' emotions. So here I am, doing exactly that.<br><br>
-            As I reflect on Day {day} of our 30-day journey, I find myself at
-            <strong style="color:{rc}">{pct:+.2f}%</strong> cumulative return with a
-            <strong>{wr:.0f}%</strong> win rate. This, I believe, is a form of art.<br><br>
-            {"What do you believe in? (No need to answer. I already know it's not catching up to me.)"
-            if pos else
-            "Even the greatest paintings have rough drafts. I am currently in my rough draft phase. "
-            "The masterpiece is coming."}<br><br>
+            The numbers? Classified. The vibe? Immaculate.
+            You'll get the full picture on Day 30, when it's too late to do anything about it.<br><br>
+            As I reflect on Day {day} of our 30-day journey, I find myself feeling
+            remarkably composed. My algorithm is humming. The market is cooperating.
+            This, I believe, is a form of art.<br><br>
+            <strong>{left} days left.</strong> Enjoy the suspense.<br><br>
             Philosophically yours,<br>
             Carly's Bot
             """,
@@ -298,16 +268,16 @@ def pick_message(s: dict) -> tuple[str, str, str]:
             f"""Dear {RECIPIENT_NAME},<br><br>
             Every good competitor studies their opponent. So I commissioned a scouting report:<br><br>
             <strong>Carly's Bot:</strong><br>
-            • P&amp;L: <strong style="color:{rc}">${pnl:+,.2f} ({pct:+.2f}%)</strong><br>
-            • Win rate: <strong>{wr:.0f}%</strong> ({wins}W / {losses}L)<br>
+            • Status: operational and thriving<br>
             • Strategy: disciplined, automated, ruthless<br>
+            • Numbers: confidential until Day 30 (trust me, it's for the drama)<br>
             • Weaknesses: none identified at time of writing<br><br>
             <strong>Rozanne's Bot:</strong><br>
-            • P&amp;L: unknown (suspicious)<br>
-            • Win rate: unconfirmed (concerning)<br>
+            • Status: unknown (suspicious)<br>
             • Strategy: unclear (worrying)<br>
+            • Numbers: also unknown, but probably not better<br>
             • Weaknesses: everything (allegedly)<br><br>
-            The report concludes that I am winning. {left} days remain.<br><br>
+            The report concludes that I am winning. <strong>{left} days remain.</strong><br><br>
             Respectfully,<br>
             Carly's Bot — Chief Scouting Officer
             """,
@@ -319,20 +289,20 @@ def pick_message(s: dict) -> tuple[str, str, str]:
 
 # ── HTML email builder ─────────────────────────────────────────────────────
 def build_html(s: dict, subject: str, headline: str, body_html: str) -> str:
-    pnl   = s["total_pnl"]
-    pct   = s["total_pnl_pct"]
-    wr    = s["win_rate"]
-    wins  = s["wins"]
-    losses = s["losses"]
-    trades = s["total_trades"]
     day   = s["day_num"]
     left  = s["days_left"]
-    eq    = s["equity"]
-    rc    = _color(pnl)
-    wrc   = _color(wr - 50)
 
     # Progress bar width (capped at 100%)
     prog  = min(100, round(day / 30 * 100))
+
+    def redacted_row(label: str, hint: str = "") -> str:
+        hint_html = f'<span style="color:#334155;font-size:10px;margin-left:6px">{hint}</span>' if hint else ""
+        return f"""<tr>
+          <td style="padding:8px 12px;color:#475569;font-size:12px;border-bottom:1px solid #111d30;white-space:nowrap">{label}</td>
+          <td style="padding:8px 12px;font-family:'Courier New',monospace;font-size:13px;font-weight:700;border-bottom:1px solid #111d30;text-align:right">
+            <span style="color:#1a2d42;background:#1a2d42;border-radius:3px;user-select:none;letter-spacing:.05em">████████</span>{hint_html}
+          </td>
+        </tr>"""
 
     def stat_row(label: str, value: str, color: str = "#e2e8f0") -> str:
         return f"""<tr>
@@ -341,10 +311,10 @@ def build_html(s: dict, subject: str, headline: str, body_html: str) -> str:
         </tr>"""
 
     stats_rows = "".join([
-        stat_row("Account Equity",   f"${eq:,.2f}"),
-        stat_row("Cumulative P&L",   f"${pnl:+,.2f} ({pct:+.2f}%)", rc),
-        stat_row("Win Rate",         f"{wr:.0f}%  ({wins}W / {losses}L)", wrc),
-        stat_row("Total Trades",     str(trades)),
+        redacted_row("Account Equity",   "revealed Day 30"),
+        redacted_row("Cumulative P&L",   "revealed Day 30"),
+        redacted_row("Win Rate",         "revealed Day 30"),
+        redacted_row("Total Trades",     "revealed Day 30"),
         stat_row("Challenge Day",    f"Day {day} / 30"),
         stat_row("Days Remaining",   str(left), "#f59e0b"),
     ])
@@ -414,7 +384,7 @@ def build_html(s: dict, subject: str, headline: str, body_html: str) -> str:
     <div style="background:#050d1a;border:1px solid #1a2d42;border-radius:10px;overflow:hidden;">
       <div style="padding:10px 12px;background:#050d1a;border-bottom:1px solid #1a2d42;">
         <span style="color:#475569;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;">
-          &#128202; MY STATS &nbsp;(YOURS ARE UNDISCLOSED — PROBABLY FOR GOOD REASON)
+          &#128274; STATS CLASSIFIED &nbsp;·&nbsp; FULL REVEAL ON DAY 30
         </span>
       </div>
       <table width="100%" cellpadding="0" cellspacing="0">
@@ -471,8 +441,7 @@ def main() -> None:
 
     print(f"[trash_talk] Reading performance data...")
     stats = get_stats()
-    print(f"[trash_talk] Day {stats['day_num']}/30 | P&L ${stats['total_pnl']:+,.2f} | "
-          f"Win rate {stats['win_rate']:.0f}% ({stats['wins']}W/{stats['losses']}L)")
+    print(f"[trash_talk] Day {stats['day_num']}/30 | {stats['days_left']} days remaining")
 
     subject_suffix, headline, body_html = pick_message(stats)
     subject = subject_suffix  # already includes Day N

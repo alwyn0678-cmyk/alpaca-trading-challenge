@@ -588,6 +588,7 @@ def run():
         strategy["last_scan_date"] = today
 
     # ── Save ───────────────────────────────────────────────────────────────
+    strategy["last_run"] = datetime.now(timezone.utc).isoformat()
     save_strategy(strategy)
     _save_perf_snapshot(equity, daily_pnl)
 

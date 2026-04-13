@@ -7,6 +7,7 @@ Opens at: http://localhost:5050
 
 import json
 import os
+import re
 import requests
 from pathlib import Path
 from datetime import datetime, timezone
@@ -92,6 +93,23 @@ def get_live_data():
                     lt = data.get("latestTrade", {})
                     trigger_prices[sym] = lt.get("p", 0)
 
+    # Last run timestamp from strategy.json (written by bot.py after each run)
+    last_run_iso = strategy.get("last_run", "")
+    last_run_str = ""
+    last_run_ago = ""
+    if last_run_iso:
+        try:
+            lr = datetime.fromisoformat(last_run_iso.replace("Z", "+00:00"))
+            last_run_str = lr.strftime("%Y-%m-%d %H:%M UTC")
+            delta = datetime.now(timezone.utc) - lr
+            mins  = int(delta.total_seconds() // 60)
+            if mins < 60:
+                last_run_ago = f"{mins}m ago"
+            else:
+                last_run_ago = f"{mins // 60}h {mins % 60}m ago"
+        except Exception:
+            last_run_str = last_run_iso[:16]
+
     return {
         "equity":       equity,
         "cash":         cash,
@@ -108,102 +126,89 @@ def get_live_data():
         "trigger_prices": trigger_prices,
         "challenge_start": strategy.get("challenge_start", ""),
         "challenge_end":   strategy.get("challenge_end", ""),
+        "last_run_str": last_run_str,
+        "last_run_ago": last_run_ago,
+        "activity_log": get_activity_log(),
         "now":          datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
     }
 
+# ── Activity log ──────────────────────────────────────────────────────────
+def get_activity_log():
+    """Parse bot.log into a list of recent activity entries (last 2 runs)."""
+    log_file = BASE_DIR / "bot.log"
+    entries = []
+    if not log_file.exists():
+        return entries
+
+    lines = log_file.read_text(errors="replace").splitlines()
+
+    # Find the start of the last 2 runs (=== dividers)
+    run_starts = [i for i, l in enumerate(lines) if "=" * 20 in l and i+1 < len(lines) and "ALPACA BOT" in lines[i+1]]
+    if not run_starts:
+        slice_lines = lines[-40:]
+    else:
+        start_idx = run_starts[-2] if len(run_starts) >= 2 else run_starts[-1]
+        slice_lines = lines[start_idx:]
+
+    skip_patterns = re.compile(r"={10,}|Market check starting")
+    level_map = {"INFO": "#60a5fa", "WARNING": "#f59e0b", "ERROR": "#ef4444"}
+
+    for line in slice_lines:
+        line = line.strip()
+        if not line or skip_patterns.search(line):
+            continue
+        parts = line.split(" | ", 2)
+        if len(parts) == 3:
+            ts_raw, level, msg = parts
+            ts = ts_raw[:16]
+            color = level_map.get(level.strip(), "#94a3b8")
+        else:
+            ts, color, msg = "", "#94a3b8", line
+        entries.append({"ts": ts, "color": color, "msg": msg.strip()})
+
+    return entries[-60:]
+
+
 # ── HTML Dashboard ─────────────────────────────────────────────────────────
 def render_html(d):
-    pnl_color  = "#22c55e" if d["total_pnl"] >= 0 else "#ef4444"
-    day_color  = "#22c55e" if d["day_pnl"] >= 0 else "#ef4444"
-    mkt_badge  = ('<span style="background:#22c55e;color:#fff;padding:3px 10px;border-radius:20px;font-size:12px">● MARKET OPEN</span>'
-                  if d["is_open"] else
-                  '<span style="background:#6b7280;color:#fff;padding:3px 10px;border-radius:20px;font-size:12px">○ MARKET CLOSED</span>')
-
-    total_return_pct = (d["total_pnl"] / d["start_equity"] * 100) if d["start_equity"] else 0
-
-    # ── Positions table ────────────────────────────────────────────────────
-    pos_rows = ""
-    for p in d["positions"]:
-        sym    = p.get("symbol","")
-        qty    = p.get("qty","")
-        entry  = float(p.get("avg_entry_price", 0))
-        curr   = float(p.get("current_price", 0))
-        pnl    = float(p.get("unrealized_pl", 0))
-        pnl_p  = float(p.get("unrealized_plpc", 0)) * 100
-        c      = "#22c55e" if pnl >= 0 else "#ef4444"
-        pos_rows += f"""
-        <tr>
-          <td><b>{sym}</b></td><td>{qty}</td>
-          <td>${entry:.2f}</td><td>${curr:.2f}</td>
-          <td style="color:{c}">${pnl:+.2f} ({pnl_p:+.1f}%)</td>
-        </tr>"""
-
-    if not pos_rows:
-        pos_rows = '<tr><td colspan="5" style="color:#6b7280;text-align:center">No open positions</td></tr>'
-
-    # ── Triggers table ─────────────────────────────────────────────────────
-    status_colors = {
-        "active": "#3b82f6", "in_trade": "#22c55e",
-        "stopped_out": "#ef4444", "closed": "#6b7280"
-    }
-    trig_rows = ""
-    for t in d["triggers"]:
-        sym    = t.get("symbol","")
-        stype  = t.get("setup_type","")
-        status = t.get("status","")
-        sc     = status_colors.get(status, "#6b7280")
-        entry  = t.get("entry_price") or t.get("pullback_low","—")
-        stop   = t.get("stop","—")
-        t1     = t.get("target_1","—")
-        curr   = d["trigger_prices"].get(sym, "—")
-        curr_s = f"${curr:.2f}" if isinstance(curr, (int, float)) and curr else "—"
-        trail  = f"${t['trailing_stop']:.2f}" if t.get("trailing_stop") else "—"
-        trig_rows += f"""
-        <tr>
-          <td><b>{sym}</b></td>
-          <td>{stype}</td>
-          <td><span style="background:{sc};color:#fff;padding:2px 8px;border-radius:12px;font-size:11px">{status}</span></td>
-          <td>{curr_s}</td>
-          <td>${entry}</td>
-          <td>${stop}</td>
-          <td>${t1}</td>
-          <td>{trail}</td>
-        </tr>"""
-
-    if not trig_rows:
-        trig_rows = '<tr><td colspan="8" style="color:#6b7280;text-align:center">No triggers loaded</td></tr>'
-
-    # ── Trade log ──────────────────────────────────────────────────────────
-    trade_rows = ""
-    action_colors = {
-        "ENTRY": "#3b82f6", "TARGET_1": "#22c55e",
-        "STOP_LOSS": "#ef4444", "TRAILING_STOP": "#f59e0b"
-    }
-    for tr in reversed(d["trades"][-30:]):
-        action = tr.get("action","")
-        sym    = tr.get("symbol","")
-        qty    = tr.get("qty","")
-        price  = tr.get("price","")
-        pnl    = tr.get("pnl", "")
-        ts     = tr.get("timestamp","")[:16].replace("T"," ")
-        ac     = action_colors.get(action, "#6b7280")
-        pnl_s  = f'<span style="color:{"#22c55e" if float(pnl)>=0 else "#ef4444"}">${float(pnl):+.2f}</span>' if pnl != "" else "—"
-        trade_rows += f"""
-        <tr>
-          <td>{ts}</td>
-          <td><span style="background:{ac};color:#fff;padding:2px 8px;border-radius:12px;font-size:11px">{action}</span></td>
-          <td><b>{sym}</b></td><td>{qty}</td><td>${price}</td><td>{pnl_s}</td>
-        </tr>"""
-
-    if not trade_rows:
-        trade_rows = '<tr><td colspan="6" style="color:#6b7280;text-align:center">No trades yet</td></tr>'
-
-    # ── Daily PnL chart — full 30-day challenge timeline ──────────────────
     from datetime import date as _date, timedelta as _td
-    daily = d["perf"].get("daily_pnl", {})
-    c_start = d.get("challenge_start", "")
-    today_str = _date.today().isoformat()
 
+    # ── Color helpers ──────────────────────────────────────────────────────
+    pnl_color = "#22c55e" if d["total_pnl"] >= 0 else "#ef4444"
+    day_color  = "#22c55e" if d["day_pnl"] >= 0 else "#ef4444"
+    pnl_class  = "profit" if d["total_pnl"] >= 0 else "loss"
+    day_class  = "profit" if d["day_pnl"] >= 0 else "loss"
+
+    # ── Market badge ───────────────────────────────────────────────────────
+    mkt_badge = (
+        '<span class="mkt-badge open">&#9679; MARKET OPEN</span>'
+        if d["is_open"] else
+        '<span class="mkt-badge closed">&#9675; MARKET CLOSED</span>'
+    )
+
+    # ── Performance metrics ────────────────────────────────────────────────
+    wins            = d["perf"].get("wins", 0)
+    losses          = d["perf"].get("losses", 0)
+    total_completed = wins + losses
+    win_rate        = (wins / total_completed * 100) if total_completed > 0 else 0
+    total_return_pct = (d["total_pnl"] / d["start_equity"] * 100) if d["start_equity"] else 0
+    win_rate_color  = "var(--green)" if win_rate >= 50 else "var(--red)"
+
+    # ── Challenge progress ─────────────────────────────────────────────────
+    c_start   = d.get("challenge_start", "")
+    today_str = _date.today().isoformat()
+    if c_start:
+        start_d      = _date.fromisoformat(c_start)
+        days_elapsed = max(0, (_date.today() - start_d).days + 1)
+        progress_pct = min(100.0, days_elapsed / 30 * 100)
+        days_left    = max(0, 30 - days_elapsed)
+    else:
+        days_elapsed = 0
+        progress_pct = 0.0
+        days_left    = 30
+
+    # ── Chart data ─────────────────────────────────────────────────────────
+    daily = d["perf"].get("daily_pnl", {})
     if c_start:
         start_d = _date.fromisoformat(c_start)
         chart_labels = [(start_d + _td(days=i)).isoformat() for i in range(30)]
@@ -211,169 +216,793 @@ def render_html(d):
         chart_labels = list(daily.keys())[-30:]
 
     chart_values = [daily.get(lbl, 0) for lbl in chart_labels]
+
+    # Cumulative P&L line (None for future dates so Chart.js skips them)
+    cum_values = []
+    running = 0.0
+    for lbl, v in zip(chart_labels, chart_values):
+        if lbl <= today_str:
+            running += v
+            cum_values.append(round(running, 2))
+        else:
+            cum_values.append(None)
+
     chart_colors = []
     for lbl, v in zip(chart_labels, chart_values):
         if lbl > today_str:
-            chart_colors.append('"#1e293b"')    # future — dark placeholder
+            chart_colors.append('"rgba(30,41,59,0.4)"')
         elif v > 0:
-            chart_colors.append('"#22c55e"')    # profit — green
+            chart_colors.append('"rgba(34,197,94,0.85)"')
         elif v < 0:
-            chart_colors.append('"#ef4444"')    # loss — red
+            chart_colors.append('"rgba(239,68,68,0.85)"')
         else:
-            chart_colors.append('"#334155"')    # no trade / flat — grey
+            chart_colors.append('"rgba(51,65,85,0.5)"')
 
-    # Milestone dates: Day 1, 7, 14, 21, 30
+    # Milestone dates
     if c_start:
         start_d = _date.fromisoformat(c_start)
         milestones = {
-            (start_d + _td(days=0)).isoformat():  "Day 1",
-            (start_d + _td(days=6)).isoformat():  "Day 7",
-            (start_d + _td(days=13)).isoformat(): "Day 14",
-            (start_d + _td(days=20)).isoformat(): "Day 21",
-            (start_d + _td(days=29)).isoformat(): "Day 30",
+            (start_d + _td(days=0)).isoformat():  "D1",
+            (start_d + _td(days=6)).isoformat():  "D7",
+            (start_d + _td(days=13)).isoformat(): "D14",
+            (start_d + _td(days=20)).isoformat(): "D21",
+            (start_d + _td(days=29)).isoformat(): "D30",
         }
     else:
         milestones = {}
+
+    # ── Positions table ────────────────────────────────────────────────────
+    pos_rows = ""
+    for p in d["positions"]:
+        sym   = p.get("symbol", "")
+        qty   = p.get("qty", "")
+        entry = float(p.get("avg_entry_price", 0))
+        curr  = float(p.get("current_price", 0))
+        pnl   = float(p.get("unrealized_pl", 0))
+        pnl_p = float(p.get("unrealized_plpc", 0)) * 100
+        c     = "#22c55e" if pnl >= 0 else "#ef4444"
+        sign  = "+" if pnl >= 0 else ""
+        pos_rows += f"""
+        <tr>
+          <td><span class="sym">{sym}</span></td>
+          <td class="mono">{qty}</td>
+          <td class="mono">${entry:.2f}</td>
+          <td class="mono">${curr:.2f}</td>
+          <td class="mono" style="color:{c}">{sign}${abs(pnl):.2f} ({pnl_p:+.1f}%)</td>
+        </tr>"""
+
+    if not pos_rows:
+        pos_rows = '<tr><td colspan="5" class="empty-row">No open positions</td></tr>'
+
+    # ── Triggers table ─────────────────────────────────────────────────────
+    status_styles = {
+        "active":      ("status-blue",  "Active"),
+        "in_trade":    ("status-green", "In Trade"),
+        "stopped_out": ("status-red",   "Stopped"),
+        "closed":      ("status-gray",  "Closed"),
+    }
+    trig_rows = ""
+    for t in d["triggers"]:
+        sym    = t.get("symbol", "")
+        stype  = t.get("setup_type", "")
+        status = t.get("status", "")
+        cls, label = status_styles.get(status, ("status-gray", status.title()))
+        entry  = t.get("entry_price") or t.get("pullback_low", "—")
+        stop   = t.get("stop", "—")
+        t1     = t.get("target_1", "—")
+        curr   = d["trigger_prices"].get(sym, "—")
+        curr_s = f"${curr:.2f}" if isinstance(curr, (int, float)) and curr else "—"
+        trail  = f"${t['trailing_stop']:.2f}" if t.get("trailing_stop") else "—"
+        trig_rows += f"""
+        <tr>
+          <td><span class="sym">{sym}</span></td>
+          <td class="setup-type">{stype}</td>
+          <td><span class="status-pill {cls}">{label}</span></td>
+          <td class="mono">{curr_s}</td>
+          <td class="mono">${entry}</td>
+          <td class="mono">${stop}</td>
+          <td class="mono">${t1}</td>
+          <td class="mono">{trail}</td>
+        </tr>"""
+
+    if not trig_rows:
+        trig_rows = '<tr><td colspan="8" class="empty-row">No triggers loaded</td></tr>'
+
+    # ── Trade log ──────────────────────────────────────────────────────────
+    action_styles = {
+        "ENTRY":         "action-blue",
+        "TARGET_1":      "action-green",
+        "STOP_LOSS":     "action-red",
+        "TRAILING_STOP": "action-amber",
+    }
+    trade_rows = ""
+    for tr in reversed(d["trades"][-30:]):
+        action = tr.get("action", "")
+        sym    = tr.get("symbol", "")
+        qty    = tr.get("qty", "")
+        price  = tr.get("price", "")
+        pnl    = tr.get("pnl", "")
+        ts     = tr.get("timestamp", "")[:16].replace("T", " ")
+        acls   = action_styles.get(action, "action-gray")
+        if pnl != "":
+            pv = float(pnl)
+            pc = "#22c55e" if pv >= 0 else "#ef4444"
+            pnl_s = f'<span class="mono" style="color:{pc}">${pv:+.2f}</span>'
+        else:
+            pnl_s = '<span class="text-muted">—</span>'
+        trade_rows += f"""
+        <tr>
+          <td class="mono text-muted">{ts}</td>
+          <td><span class="action-pill {acls}">{action}</span></td>
+          <td><span class="sym">{sym}</span></td>
+          <td class="mono">{qty}</td>
+          <td class="mono">${price}</td>
+          <td>{pnl_s}</td>
+        </tr>"""
+
+    if not trade_rows:
+        trade_rows = '<tr><td colspan="6" class="empty-row">No trades yet</td></tr>'
+
+    # ── Activity log ───────────────────────────────────────────────────────
+    activity_rows = ""
+    prev_ts_date = None
+    for entry in reversed(d["activity_log"]):
+        ts   = entry["ts"]
+        msg  = entry["msg"].replace("<", "&lt;").replace(">", "&gt;")
+        col  = entry["color"]
+        ts_date = ts[:10] if ts else ""
+        if ts_date and ts_date != prev_ts_date and prev_ts_date is not None:
+            activity_rows += '<div class="run-sep"></div>'
+        prev_ts_date = ts_date
+        activity_rows += f'<div class="log-line"><span class="log-ts">{ts}</span><span class="log-msg" style="color:{col}">{msg}</span></div>'
+
+    if not activity_rows:
+        activity_rows = '<p class="empty-log">No activity recorded yet — bot hasn\'t run during market hours.</p>'
 
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Alpaca 30-Day Challenge Dashboard</title>
+<title>Alpaca 30-Day Challenge</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
-  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-          background: #0f172a; color: #e2e8f0; min-height: 100vh; }}
-  .header {{ background: #1e293b; border-bottom: 1px solid #334155;
-             padding: 16px 32px; display: flex; align-items: center;
-             justify-content: space-between; }}
-  .header h1 {{ font-size: 20px; font-weight: 700; color: #f1f5f9; }}
-  .header .meta {{ font-size: 12px; color: #94a3b8; }}
-  .grid {{ display: grid; grid-template-columns: repeat(5,1fr);
-           gap: 16px; padding: 24px 32px 0; }}
-  .card {{ background: #1e293b; border: 1px solid #334155;
-           border-radius: 12px; padding: 20px; }}
-  .card .label {{ font-size: 11px; color: #94a3b8; text-transform: uppercase;
-                  letter-spacing: .05em; margin-bottom: 6px; }}
-  .card .value {{ font-size: 26px; font-weight: 700; }}
-  .card .sub   {{ font-size: 12px; color: #64748b; margin-top: 4px; }}
-  .section {{ margin: 24px 32px; }}
-  .section h2 {{ font-size: 14px; font-weight: 600; color: #94a3b8;
-                 text-transform: uppercase; letter-spacing: .05em;
-                 margin-bottom: 12px; }}
-  table {{ width: 100%; border-collapse: collapse;
-           background: #1e293b; border-radius: 12px; overflow: hidden; }}
-  th {{ background: #0f172a; color: #94a3b8; font-size: 11px;
-        text-transform: uppercase; letter-spacing: .05em;
-        padding: 10px 14px; text-align: left; }}
-  td {{ padding: 10px 14px; font-size: 13px;
-        border-top: 1px solid #1e293b; }}
-  tr:hover td {{ background: #273548; }}
-  .chart-wrap {{ background: #1e293b; border: 1px solid #334155;
-                 border-radius: 12px; padding: 20px; margin: 24px 32px; }}
-  .refresh {{ font-size: 11px; color: #64748b; }}
-  a {{ color: #60a5fa; text-decoration: none; }}
-  a:hover {{ text-decoration: underline; }}
+/* ── Reset & Tokens ──────────────────────────────── */
+*, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+
+:root {{
+  --bg:           #050d1a;
+  --surface:      #0c1526;
+  --surface-2:    #111d30;
+  --border:       #1a2d42;
+  --border-hover: #2a4060;
+  --text:         #e2e8f0;
+  --text-2:       #94a3b8;
+  --text-muted:   #475569;
+  --blue:         #3b82f6;
+  --blue-dim:     rgba(59,130,246,.12);
+  --green:        #22c55e;
+  --green-dim:    rgba(34,197,94,.12);
+  --red:          #ef4444;
+  --red-dim:      rgba(239,68,68,.12);
+  --amber:        #f59e0b;
+  --amber-dim:    rgba(245,158,11,.12);
+  --radius:       12px;
+  --font-mono:    'Fira Code', 'SF Mono', 'Consolas', monospace;
+  --font-sans:    'Fira Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}}
+
+html, body {{
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  min-height: 100vh;
+}}
+
+/* ── Header ──────────────────────────────────────── */
+.header {{
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: rgba(5,13,26,.88);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--border);
+  padding: 13px 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}}
+
+.header-brand {{
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}}
+
+.header-icon {{
+  width: 34px;
+  height: 34px;
+  background: var(--blue-dim);
+  border: 1px solid rgba(59,130,246,.25);
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}}
+
+.header-title {{
+  font-size: 16px;
+  font-weight: 700;
+  color: #f1f5f9;
+  letter-spacing: -0.02em;
+}}
+
+.header-meta {{
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 1px;
+  font-family: var(--font-mono);
+}}
+
+.header-right {{
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-shrink: 0;
+}}
+
+.mkt-badge {{
+  font-size: 10px;
+  font-weight: 700;
+  padding: 4px 11px;
+  border-radius: 20px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}}
+.mkt-badge.open {{
+  background: var(--green-dim);
+  color: var(--green);
+  border: 1px solid rgba(34,197,94,.3);
+}}
+.mkt-badge.closed {{
+  background: rgba(71,85,105,.12);
+  color: var(--text-2);
+  border: 1px solid rgba(71,85,105,.25);
+}}
+
+.refresh-link {{
+  font-size: 11px;
+  color: var(--text-muted);
+  text-decoration: none;
+  transition: color .15s;
+  cursor: pointer;
+}}
+.refresh-link:hover {{ color: var(--blue); }}
+
+/* ── Challenge Progress ──────────────────────────── */
+.challenge-bar {{
+  padding: 18px 28px 0;
+}}
+
+.challenge-header {{
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}}
+
+.challenge-title {{
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .1em;
+}}
+
+.challenge-stats {{
+  font-size: 11px;
+  color: var(--text-muted);
+}}
+
+.challenge-stats strong {{
+  color: var(--amber);
+  font-family: var(--font-mono);
+}}
+
+.progress-track {{
+  height: 5px;
+  background: var(--surface-2);
+  border-radius: 3px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}}
+
+.progress-fill {{
+  height: 100%;
+  background: linear-gradient(90deg, #1d4ed8, #3b82f6 60%, #60a5fa);
+  border-radius: 3px;
+  transition: width .6s cubic-bezier(.4,0,.2,1);
+}}
+
+.progress-ticks {{
+  display: flex;
+  justify-content: space-between;
+  margin-top: 5px;
+  padding: 0 1px;
+}}
+
+.progress-tick {{
+  font-size: 9px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-weight: 500;
+}}
+
+/* ── KPI Grid ────────────────────────────────────── */
+.kpi-grid {{
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 12px;
+  padding: 18px 28px 0;
+}}
+
+@media (max-width: 1200px) {{ .kpi-grid {{ grid-template-columns: repeat(3, 1fr); }} }}
+@media (max-width: 768px)  {{ .kpi-grid {{ grid-template-columns: repeat(2, 1fr); }} }}
+
+.kpi-card {{
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  transition: border-color .2s, transform .15s;
+}}
+
+.kpi-card:hover {{
+  border-color: var(--border-hover);
+  transform: translateY(-1px);
+}}
+
+.kpi-card.profit {{ border-color: rgba(34,197,94,.22); }}
+.kpi-card.loss   {{ border-color: rgba(239,68,68,.22); }}
+
+.kpi-label {{
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  margin-bottom: 8px;
+}}
+
+.kpi-value {{
+  font-family: var(--font-mono);
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}}
+
+.kpi-sub {{
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 5px;
+  font-family: var(--font-mono);
+}}
+
+.kpi-badge {{
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 20px;
+  margin-top: 7px;
+  font-family: var(--font-mono);
+  letter-spacing: .02em;
+}}
+.kpi-badge.up   {{ background: var(--green-dim); color: var(--green); border: 1px solid rgba(34,197,94,.2); }}
+.kpi-badge.down {{ background: var(--red-dim);   color: var(--red);   border: 1px solid rgba(239,68,68,.2); }}
+
+/* ── Chart Section ───────────────────────────────── */
+.chart-section {{
+  margin: 18px 28px 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px 22px;
+}}
+
+.chart-header {{
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}}
+
+.chart-title {{
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  margin-bottom: 8px;
+}}
+
+.chart-legend {{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}}
+
+.legend-item {{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--text-muted);
+}}
+
+.legend-dot {{
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}}
+
+.legend-line {{
+  width: 16px;
+  height: 2px;
+  border-radius: 1px;
+  flex-shrink: 0;
+}}
+
+/* ── Sections ────────────────────────────────────── */
+.section {{ margin: 18px 28px 0; }}
+
+.section-header {{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}}
+
+.section-title {{
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .1em;
+}}
+
+.section-count {{
+  font-size: 10px;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 2px 10px;
+  font-family: var(--font-mono);
+}}
+
+/* ── Tables ──────────────────────────────────────── */
+.data-table {{
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}}
+
+.data-table thead th {{
+  background: var(--bg);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  padding: 10px 16px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}}
+
+.data-table tbody td {{
+  padding: 11px 16px;
+  font-size: 12.5px;
+  border-bottom: 1px solid rgba(26,45,66,.55);
+  color: var(--text-2);
+  transition: background .1s;
+}}
+
+.data-table tbody tr:last-child td {{ border-bottom: none; }}
+
+.data-table tbody tr:hover td {{
+  background: rgba(59,130,246,.04);
+  color: var(--text);
+}}
+
+/* ── Utility classes ─────────────────────────────── */
+.mono      {{ font-family: var(--font-mono); }}
+.text-muted {{ color: var(--text-muted) !important; }}
+
+.sym {{
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--text);
+  font-size: 13px;
+  letter-spacing: .03em;
+}}
+
+.setup-type {{
+  font-size: 11px;
+  color: var(--text-muted);
+}}
+
+/* ── Status / Action Pills ───────────────────────── */
+.status-pill, .action-pill {{
+  display: inline-block;
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 20px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}}
+
+.status-blue  {{ background: var(--blue-dim);            color: var(--blue);      border: 1px solid rgba(59,130,246,.22); }}
+.status-green {{ background: var(--green-dim);           color: var(--green);     border: 1px solid rgba(34,197,94,.22); }}
+.status-red   {{ background: var(--red-dim);             color: var(--red);       border: 1px solid rgba(239,68,68,.22); }}
+.status-gray  {{ background: rgba(71,85,105,.12);        color: var(--text-muted); border: 1px solid rgba(71,85,105,.2); }}
+
+.action-blue  {{ background: var(--blue-dim);            color: var(--blue);      border: 1px solid rgba(59,130,246,.22); }}
+.action-green {{ background: var(--green-dim);           color: var(--green);     border: 1px solid rgba(34,197,94,.22); }}
+.action-red   {{ background: var(--red-dim);             color: var(--red);       border: 1px solid rgba(239,68,68,.22); }}
+.action-amber {{ background: var(--amber-dim);           color: var(--amber);     border: 1px solid rgba(245,158,11,.22); }}
+.action-gray  {{ background: rgba(71,85,105,.12);        color: var(--text-muted); border: 1px solid rgba(71,85,105,.2); }}
+
+/* ── Empty States ────────────────────────────────── */
+.empty-row {{
+  text-align: center !important;
+  color: var(--text-muted) !important;
+  padding: 28px 16px !important;
+  font-size: 12px !important;
+}}
+
+.empty-log {{
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 16px 0;
+}}
+
+/* ── Activity Log ────────────────────────────────── */
+.activity-log {{
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  max-height: 360px;
+  overflow-y: auto;
+  font-family: var(--font-mono);
+}}
+
+.activity-log::-webkit-scrollbar {{ width: 4px; }}
+.activity-log::-webkit-scrollbar-track {{ background: transparent; }}
+.activity-log::-webkit-scrollbar-thumb {{ background: var(--border); border-radius: 2px; }}
+
+.run-sep {{ border-top: 1px solid var(--border); margin: 8px 0; }}
+
+.log-line {{
+  display: flex;
+  gap: 12px;
+  padding: 2px 0;
+  font-size: 11px;
+  line-height: 1.65;
+  border-bottom: 1px solid rgba(26,45,66,.4);
+}}
+.log-line:last-child {{ border-bottom: none; }}
+
+.log-ts {{
+  color: var(--text-muted);
+  white-space: nowrap;
+  min-width: 128px;
+  flex-shrink: 0;
+}}
+
+.log-msg {{ color: #cbd5e1; word-break: break-word; }}
+
+/* ── Bottom spacer ───────────────────────────────── */
+.spacer {{ height: 48px; }}
 </style>
 <meta http-equiv="refresh" content="120">
 </head>
 <body>
 
-<div class="header">
-  <div>
-    <h1>Alpaca 30-Day Challenge</h1>
-    <div class="meta">{d['challenge_start']} → {d['challenge_end']} &nbsp;|&nbsp; {d['now']} &nbsp;|&nbsp; {mkt_badge}</div>
+<!-- ── Header ──────────────────────────────────────────────────────────── -->
+<header class="header">
+  <div class="header-brand">
+    <div class="header-icon">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+      </svg>
+    </div>
+    <div>
+      <div class="header-title">Alpaca 30-Day Challenge</div>
+      <div class="header-meta">{d['challenge_start']} &rarr; {d['challenge_end']} &nbsp;&middot;&nbsp; {d['now']}</div>
+    </div>
   </div>
-  <div class="refresh">Auto-refreshes every 2 min &nbsp;|&nbsp; <a href="/">Refresh now</a></div>
+  <div class="header-right">
+    {mkt_badge}
+    <a class="refresh-link" href="/">&#8635; Refresh</a>
+  </div>
+</header>
+
+<!-- ── Challenge Progress ──────────────────────────────────────────────── -->
+<div class="challenge-bar">
+  <div class="challenge-header">
+    <span class="challenge-title">Challenge Progress</span>
+    <span class="challenge-stats">
+      Day <strong>{days_elapsed}</strong> of 30
+      &nbsp;&middot;&nbsp;
+      <strong>{days_left}</strong> days remaining
+    </span>
+  </div>
+  <div class="progress-track">
+    <div class="progress-fill" style="width:{progress_pct:.1f}%"></div>
+  </div>
+  <div class="progress-ticks">
+    <span class="progress-tick">D1</span>
+    <span class="progress-tick">D7</span>
+    <span class="progress-tick">D14</span>
+    <span class="progress-tick">D21</span>
+    <span class="progress-tick">D30</span>
+  </div>
 </div>
 
-<!-- KPI cards -->
-<div class="grid">
-  <div class="card">
-    <div class="label">Account Equity</div>
-    <div class="value">${d['equity']:,.2f}</div>
-    <div class="sub">Started at ${d['start_equity']:,.2f}</div>
+<!-- ── KPI Cards ───────────────────────────────────────────────────────── -->
+<div class="kpi-grid">
+
+  <div class="kpi-card">
+    <div class="kpi-label">Account Equity</div>
+    <div class="kpi-value">${d['equity']:,.2f}</div>
+    <div class="kpi-sub">Started ${d['start_equity']:,.2f}</div>
   </div>
-  <div class="card">
-    <div class="label">Total P&L</div>
-    <div class="value" style="color:{pnl_color}">${d['total_pnl']:+,.2f}</div>
-    <div class="sub" style="color:{pnl_color}">{total_return_pct:+.2f}% return</div>
+
+  <div class="kpi-card {pnl_class}">
+    <div class="kpi-label">Total P&amp;L</div>
+    <div class="kpi-value" style="color:{pnl_color}">${d['total_pnl']:+,.2f}</div>
+    <span class="kpi-badge {'up' if d['total_pnl'] >= 0 else 'down'}">{total_return_pct:+.2f}% return</span>
   </div>
-  <div class="card">
-    <div class="label">Today's P&L</div>
-    <div class="value" style="color:{day_color}">${d['day_pnl']:+,.2f}</div>
-    <div class="sub">Daily limit: -${d['start_equity']*0.015:,.0f}</div>
+
+  <div class="kpi-card {day_class}">
+    <div class="kpi-label">Today's P&amp;L</div>
+    <div class="kpi-value" style="color:{day_color}">${d['day_pnl']:+,.2f}</div>
+    <div class="kpi-sub">Daily limit &minus;${d['start_equity']*0.015:,.0f}</div>
   </div>
-  <div class="card">
-    <div class="label">Buying Power</div>
-    <div class="value">${d['buying_power']:,.2f}</div>
-    <div class="sub">Cash: ${d['cash']:,.2f}</div>
+
+  <div class="kpi-card">
+    <div class="kpi-label">Buying Power</div>
+    <div class="kpi-value">${d['buying_power']:,.2f}</div>
+    <div class="kpi-sub">Cash ${d['cash']:,.2f}</div>
   </div>
-  <div class="card">
-    <div class="label">Total Trades</div>
-    <div class="value">{len(d['trades'])}</div>
-    <div class="sub">Wins: {d['perf'].get('wins',0)} | Losses: {d['perf'].get('losses',0)}</div>
+
+  <div class="kpi-card">
+    <div class="kpi-label">Win Rate</div>
+    <div class="kpi-value" style="color:{win_rate_color}">{win_rate:.0f}%</div>
+    <div class="kpi-sub">{wins}W &middot; {losses}L &middot; {len(d['trades'])} trades</div>
   </div>
+
+  <div class="kpi-card">
+    <div class="kpi-label">Last Bot Run</div>
+    <div class="kpi-value" style="font-size:19px">{d['last_run_ago'] or '&mdash;'}</div>
+    <div class="kpi-sub">{d['last_run_str'] or 'Not yet run'}</div>
+  </div>
+
 </div>
 
-<!-- Daily P&L chart -->
-<div class="chart-wrap">
-  <h2 style="font-size:14px;font-weight:600;color:#94a3b8;text-transform:uppercase;
-              letter-spacing:.05em;margin-bottom:4px">30-Day Challenge P&L</h2>
-  <p style="font-size:11px;color:#64748b;margin-bottom:14px">
-    Gold markers = Day 1 / 7 / 14 / 21 / 30 milestones &nbsp;|&nbsp;
-    <span style="color:#22c55e">&#9646;</span> Profit &nbsp;
-    <span style="color:#ef4444">&#9646;</span> Loss &nbsp;
-    <span style="color:#334155">&#9646;</span> No trade
-  </p>
-  <canvas id="pnlChart" height="90"></canvas>
+<!-- ── P&L Chart ─────────────────────────────────────────────────────────── -->
+<div class="chart-section">
+  <div class="chart-header">
+    <div>
+      <div class="chart-title">30-Day P&amp;L Overview</div>
+      <div class="chart-legend">
+        <span class="legend-item">
+          <span class="legend-dot" style="background:rgba(34,197,94,.85)"></span>Profit day
+        </span>
+        <span class="legend-item">
+          <span class="legend-dot" style="background:rgba(239,68,68,.85)"></span>Loss day
+        </span>
+        <span class="legend-item">
+          <span class="legend-line" style="background:#3b82f6"></span>Cumulative P&amp;L
+        </span>
+        <span class="legend-item">
+          <span class="legend-line" style="background:#f59e0b;height:2px;border-top:1px dashed #f59e0b"></span>Milestones
+        </span>
+      </div>
+    </div>
+  </div>
+  <canvas id="pnlChart" height="80"></canvas>
 </div>
 
-<!-- Open Positions -->
+<!-- ── Open Positions ─────────────────────────────────────────────────── -->
 <div class="section">
-  <h2>Open Positions</h2>
-  <table>
-    <thead><tr>
-      <th>Symbol</th><th>Qty</th><th>Entry</th><th>Current</th><th>Unrealized P&L</th>
-    </tr></thead>
+  <div class="section-header">
+    <span class="section-title">Open Positions</span>
+    <span class="section-count">{len(d['positions'])}</span>
+  </div>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>Symbol</th><th>Qty</th><th>Entry</th><th>Current</th><th>Unrealized P&amp;L</th>
+      </tr>
+    </thead>
     <tbody>{pos_rows}</tbody>
   </table>
 </div>
 
-<!-- Active Triggers -->
+<!-- ── Active Triggers ────────────────────────────────────────────────── -->
 <div class="section">
-  <h2>Active Triggers & Watchlist</h2>
-  <table>
-    <thead><tr>
-      <th>Symbol</th><th>Setup</th><th>Status</th><th>Current</th>
-      <th>Entry</th><th>Stop</th><th>T1</th><th>Trail Stop</th>
-    </tr></thead>
+  <div class="section-header">
+    <span class="section-title">Triggers &amp; Watchlist</span>
+    <span class="section-count">{len(d['triggers'])}</span>
+  </div>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>Symbol</th><th>Setup</th><th>Status</th><th>Current</th>
+        <th>Entry</th><th>Stop</th><th>T1</th><th>Trail Stop</th>
+      </tr>
+    </thead>
     <tbody>{trig_rows}</tbody>
   </table>
 </div>
 
-<!-- Trade Log -->
+<!-- ── Trade Log ─────────────────────────────────────────────────────── -->
 <div class="section">
-  <h2>Trade Log (Last 30)</h2>
-  <table>
-    <thead><tr>
-      <th>Time (UTC)</th><th>Action</th><th>Symbol</th><th>Qty</th><th>Price</th><th>P&L</th>
-    </tr></thead>
+  <div class="section-header">
+    <span class="section-title">Trade Log</span>
+    <span class="section-count">Last {min(30, len(d['trades']))}</span>
+  </div>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>Time (UTC)</th><th>Action</th><th>Symbol</th><th>Qty</th><th>Price</th><th>P&amp;L</th>
+      </tr>
+    </thead>
     <tbody>{trade_rows}</tbody>
   </table>
 </div>
 
-<div style="height:40px"></div>
+<!-- ── Activity Log ───────────────────────────────────────────────────── -->
+<div class="section">
+  <div class="section-header">
+    <span class="section-title">Bot Activity Log</span>
+  </div>
+  <div class="activity-log">
+    {activity_rows}
+  </div>
+</div>
+
+<div class="spacer"></div>
 
 <script>
-const labels  = {json.dumps(chart_labels)};
-const values  = {json.dumps(chart_values)};
-const colors  = [{",".join(chart_colors)}];
+const labels     = {json.dumps(chart_labels)};
+const values     = {json.dumps(chart_values)};
+const cumValues  = {json.dumps(cum_values)};
+const barColors  = [{",".join(chart_colors)}];
 const milestones = {json.dumps(milestones)};
 
-// Custom plugin: draw gold vertical lines + labels at milestone dates
+// Plugin: gold dashed vertical lines at milestone dates
 const milestonePlugin = {{
   id: "milestones",
   afterDraw(chart) {{
@@ -387,15 +1016,17 @@ const milestonePlugin = {{
       ctx.strokeStyle = "#f59e0b";
       ctx.lineWidth   = 1.5;
       ctx.setLineDash([4, 3]);
+      ctx.globalAlpha = 0.55;
       ctx.beginPath();
       ctx.moveTo(x, yAxis.top);
       ctx.lineTo(x, yAxis.bottom);
       ctx.stroke();
       ctx.setLineDash([]);
-      ctx.fillStyle  = "#f59e0b";
-      ctx.font       = "bold 10px -apple-system, sans-serif";
-      ctx.textAlign  = "center";
-      ctx.fillText(milestones[lbl], x, yAxis.top - 6);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle   = "#f59e0b";
+      ctx.font        = "700 9px 'Fira Code', monospace";
+      ctx.textAlign   = "center";
+      ctx.fillText(milestones[lbl], x, yAxis.top - 8);
       ctx.restore();
     }});
   }}
@@ -403,37 +1034,90 @@ const milestonePlugin = {{
 
 const chartCtx = document.getElementById("pnlChart").getContext("2d");
 new Chart(chartCtx, {{
-  type: "bar",
   plugins: [milestonePlugin],
   data: {{
     labels: labels,
-    datasets: [{{
-      label: "Daily P&L ($)",
-      data: values,
-      backgroundColor: colors,
-      borderRadius: 3,
-    }}]
+    datasets: [
+      {{
+        type: "bar",
+        label: "Daily P&L ($)",
+        data: values,
+        backgroundColor: barColors,
+        borderRadius: 4,
+        borderSkipped: false,
+        order: 2,
+        yAxisID: "y",
+      }},
+      {{
+        type: "line",
+        label: "Cumulative P&L ($)",
+        data: cumValues,
+        borderColor: "#3b82f6",
+        backgroundColor: "rgba(59,130,246,0.07)",
+        fill: true,
+        tension: 0.38,
+        pointRadius: 0,
+        pointHoverRadius: 4,
+        pointHoverBackgroundColor: "#3b82f6",
+        borderWidth: 2,
+        order: 1,
+        yAxisID: "y2",
+        spanGaps: false,
+      }}
+    ]
   }},
   options: {{
     responsive: true,
-    layout: {{ padding: {{ top: 20 }} }},
+    interaction: {{ mode: "index", intersect: false }},
+    layout: {{ padding: {{ top: 24, right: 8 }} }},
     plugins: {{
       legend: {{ display: false }},
       tooltip: {{
+        backgroundColor: "#0c1526",
+        borderColor: "#1a2d42",
+        borderWidth: 1,
+        titleColor: "#94a3b8",
+        titleFont: {{ family: "'Fira Code', monospace", size: 10 }},
+        bodyColor: "#e2e8f0",
+        bodyFont: {{ family: "'Fira Code', monospace", size: 11 }},
+        padding: 12,
         callbacks: {{
-          label: c => " $" + c.parsed.y.toFixed(2),
-          title: t => t[0].label + (milestones[t[0].label] ? "  (" + milestones[t[0].label] + ")" : "")
+          title: t => t[0].label + (milestones[t[0].label] ? "  · " + milestones[t[0].label] : ""),
+          label: c => {{
+            if (c.parsed.y === null) return null;
+            const pfx = c.datasetIndex === 0 ? "Daily" : "Cumul";
+            const sign = c.parsed.y >= 0 ? "+" : "";
+            return " " + pfx + ": " + sign + "$" + c.parsed.y.toFixed(2);
+          }}
         }}
       }}
     }},
     scales: {{
       x: {{
-        grid: {{ color: "#1e293b" }},
-        ticks: {{ color: "#94a3b8", font: {{ size: 10 }}, maxRotation: 45 }}
+        grid: {{ color: "rgba(26,45,66,.5)", drawTicks: false }},
+        ticks: {{
+          color: "#475569",
+          font: {{ size: 9, family: "'Fira Code', monospace" }},
+          maxRotation: 45
+        }}
       }},
       y: {{
-        grid: {{ color: "#334155" }},
-        ticks: {{ color: "#94a3b8", callback: v => "$" + v.toFixed(0) }}
+        position: "left",
+        grid: {{ color: "rgba(26,45,66,.5)" }},
+        ticks: {{
+          color: "#475569",
+          font: {{ size: 9, family: "'Fira Code', monospace" }},
+          callback: v => (v >= 0 ? "+" : "") + "$" + v.toFixed(0)
+        }}
+      }},
+      y2: {{
+        position: "right",
+        grid: {{ display: false }},
+        ticks: {{
+          color: "#3b82f6",
+          font: {{ size: 9, family: "'Fira Code', monospace" }},
+          callback: v => (v >= 0 ? "+" : "") + "$" + v.toFixed(0)
+        }}
       }}
     }}
   }}
@@ -441,6 +1125,7 @@ new Chart(chartCtx, {{
 </script>
 </body>
 </html>"""
+
 
 # ── HTTP Server ────────────────────────────────────────────────────────────
 class Handler(BaseHTTPRequestHandler):
