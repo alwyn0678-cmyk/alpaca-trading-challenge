@@ -198,11 +198,42 @@ def render_html(d):
     if not trade_rows:
         trade_rows = '<tr><td colspan="6" style="color:#6b7280;text-align:center">No trades yet</td></tr>'
 
-    # ── Daily PnL chart data ───────────────────────────────────────────────
+    # ── Daily PnL chart — full 30-day challenge timeline ──────────────────
+    from datetime import date as _date, timedelta as _td
     daily = d["perf"].get("daily_pnl", {})
-    chart_labels = list(daily.keys())[-14:]
-    chart_values = [daily[k] for k in chart_labels]
-    chart_colors = ['"#22c55e"' if v >= 0 else '"#ef4444"' for v in chart_values]
+    c_start = d.get("challenge_start", "")
+    today_str = _date.today().isoformat()
+
+    if c_start:
+        start_d = _date.fromisoformat(c_start)
+        chart_labels = [(start_d + _td(days=i)).isoformat() for i in range(30)]
+    else:
+        chart_labels = list(daily.keys())[-30:]
+
+    chart_values = [daily.get(lbl, 0) for lbl in chart_labels]
+    chart_colors = []
+    for lbl, v in zip(chart_labels, chart_values):
+        if lbl > today_str:
+            chart_colors.append('"#1e293b"')    # future — dark placeholder
+        elif v > 0:
+            chart_colors.append('"#22c55e"')    # profit — green
+        elif v < 0:
+            chart_colors.append('"#ef4444"')    # loss — red
+        else:
+            chart_colors.append('"#334155"')    # no trade / flat — grey
+
+    # Milestone dates: Day 1, 7, 14, 21, 30
+    if c_start:
+        start_d = _date.fromisoformat(c_start)
+        milestones = {
+            (start_d + _td(days=0)).isoformat():  "Day 1",
+            (start_d + _td(days=6)).isoformat():  "Day 7",
+            (start_d + _td(days=13)).isoformat(): "Day 14",
+            (start_d + _td(days=20)).isoformat(): "Day 21",
+            (start_d + _td(days=29)).isoformat(): "Day 30",
+        }
+    else:
+        milestones = {}
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -290,8 +321,14 @@ def render_html(d):
 <!-- Daily P&L chart -->
 <div class="chart-wrap">
   <h2 style="font-size:14px;font-weight:600;color:#94a3b8;text-transform:uppercase;
-              letter-spacing:.05em;margin-bottom:14px">Daily P&L (Last 14 Days)</h2>
-  <canvas id="pnlChart" height="80"></canvas>
+              letter-spacing:.05em;margin-bottom:4px">30-Day Challenge P&L</h2>
+  <p style="font-size:11px;color:#64748b;margin-bottom:14px">
+    Gold markers = Day 1 / 7 / 14 / 21 / 30 milestones &nbsp;|&nbsp;
+    <span style="color:#22c55e">&#9646;</span> Profit &nbsp;
+    <span style="color:#ef4444">&#9646;</span> Loss &nbsp;
+    <span style="color:#334155">&#9646;</span> No trade
+  </p>
+  <canvas id="pnlChart" height="90"></canvas>
 </div>
 
 <!-- Open Positions -->
@@ -331,35 +368,73 @@ def render_html(d):
 <div style="height:40px"></div>
 
 <script>
-const labels = {json.dumps(chart_labels)};
-const values = {json.dumps(chart_values)};
-const colors = [{",".join(chart_colors)}];
-const ctx = document.getElementById("pnlChart").getContext("2d");
-new Chart(ctx, {{
+const labels  = {json.dumps(chart_labels)};
+const values  = {json.dumps(chart_values)};
+const colors  = [{",".join(chart_colors)}];
+const milestones = {json.dumps(milestones)};
+
+// Custom plugin: draw gold vertical lines + labels at milestone dates
+const milestonePlugin = {{
+  id: "milestones",
+  afterDraw(chart) {{
+    const ctx   = chart.ctx;
+    const xAxis = chart.scales.x;
+    const yAxis = chart.scales.y;
+    chart.data.labels.forEach((lbl, i) => {{
+      if (!milestones[lbl]) return;
+      const x = xAxis.getPixelForIndex(i);
+      ctx.save();
+      ctx.strokeStyle = "#f59e0b";
+      ctx.lineWidth   = 1.5;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(x, yAxis.top);
+      ctx.lineTo(x, yAxis.bottom);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle  = "#f59e0b";
+      ctx.font       = "bold 10px -apple-system, sans-serif";
+      ctx.textAlign  = "center";
+      ctx.fillText(milestones[lbl], x, yAxis.top - 6);
+      ctx.restore();
+    }});
+  }}
+}};
+
+const chartCtx = document.getElementById("pnlChart").getContext("2d");
+new Chart(chartCtx, {{
   type: "bar",
+  plugins: [milestonePlugin],
   data: {{
     labels: labels,
     datasets: [{{
       label: "Daily P&L ($)",
       data: values,
       backgroundColor: colors,
-      borderRadius: 4,
+      borderRadius: 3,
     }}]
   }},
   options: {{
     responsive: true,
+    layout: {{ padding: {{ top: 20 }} }},
     plugins: {{
       legend: {{ display: false }},
       tooltip: {{
         callbacks: {{
-          label: ctx => " $" + ctx.parsed.y.toFixed(2)
+          label: c => " $" + c.parsed.y.toFixed(2),
+          title: t => t[0].label + (milestones[t[0].label] ? "  (" + milestones[t[0].label] + ")" : "")
         }}
       }}
     }},
     scales: {{
-      x: {{ grid: {{ color: "#1e293b" }}, ticks: {{ color: "#94a3b8", font: {{ size: 11 }} }} }},
-      y: {{ grid: {{ color: "#334155" }}, ticks: {{ color: "#94a3b8",
-               callback: v => "$" + v.toFixed(0) }} }}
+      x: {{
+        grid: {{ color: "#1e293b" }},
+        ticks: {{ color: "#94a3b8", font: {{ size: 10 }}, maxRotation: 45 }}
+      }},
+      y: {{
+        grid: {{ color: "#334155" }},
+        ticks: {{ color: "#94a3b8", callback: v => "$" + v.toFixed(0) }}
+      }}
     }}
   }}
 }});
