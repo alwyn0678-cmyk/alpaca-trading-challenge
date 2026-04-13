@@ -1,0 +1,48 @@
+{
+  "challenge_start": "2026-04-13",
+  "challenge_end": "2026-05-13",
+  "last_scan_date": "",
+  "trades_today": {},
+  "triggers": [
+    {
+      "symbol": "XLF",
+      "setup_type": "breakout",
+      "status": "active",
+      "entry_type": "breakout",
+      "entry_price": 51.30,
+      "stop": 50.50,
+      "target_1": 52.50,
+      "target_2": 54.00,
+      "t1_hit": false,
+      "trailing_active": false,
+      "trailing_stop": null,
+      "highest_price": null,
+      "actual_entry": null,
+      "qty": null,
+      "source": "manual",
+      "notes": "Bank earnings catalyst week. JPM/GS/BAC/MS all report Tue-Wed. Enter only after positive earnings reaction confirmed. Breakout above $51.27 double-tested resistance.",
+      "detected_at": "2026-04-13T11:00:00Z"
+    },
+    {
+      "symbol": "NVDA",
+      "setup_type": "pullback_50ma",
+      "status": "active",
+      "entry_type": "pullback",
+      "pullback_low": 184.00,
+      "pullback_high": 185.50,
+      "entry_price": 184.50,
+      "stop": 180.50,
+      "target_1": 192.00,
+      "target_2": 197.00,
+      "t1_hit": false,
+      "trailing_active": false,
+      "trailing_stop": null,
+      "highest_price": null,
+      "actual_entry": null,
+      "qty": null,
+      "source": "manual",
+      "notes": "50-MA breakout on 1.72x volume Apr 10. Do NOT chase $188. Wait for pullback to $184-185.50 zone. Earnings May 20 - clean event window.",
+      "detected_at": "2026-04-13T11:00:00Z"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+# Credentials — never commit these
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Bot log (can get large)
+bot.log
+
+# macOS junk
+.DS_Store
+
+# PDF generator script (local only)
+generate_strategy_pdf.py
