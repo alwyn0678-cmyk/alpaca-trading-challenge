@@ -2,11 +2,10 @@ name: Alpaca Trading Bot
 
 on:
   schedule:
-    # Runs every 2 hours on weekdays (Mon–Fri)
-    # GitHub Actions uses UTC — market hours are ~13:30–20:00 UTC
-    # Running broadly 12:00–21:00 UTC; the bot itself checks market_is_open()
-    # and exits immediately if the market is closed.
-    - cron: "0 12,14,16,18,20 * * 1-5"
+    # Runs every hour 10am–4pm ET (Mon–Fri) — competition mode
+    # ET = UTC-4 during daylight saving (April–May)
+    # 14:00–20:00 UTC = 10am–4pm ET; bot exits immediately if market closed
+    - cron: "0 14,15,16,17,18,19,20 * * 1-5"
 
   # Allow manual trigger from the GitHub Actions tab
   workflow_dispatch:

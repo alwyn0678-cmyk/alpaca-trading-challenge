@@ -63,17 +63,32 @@ HEADERS = {
 # All sizing, loss limits, and buying-power checks use this cap.
 CHALLENGE_CAPITAL  = 10_000.0
 
-# ── Risk constants (Skill.md) ──────────────────────────────────────────────
-MAX_RISK_PCT       = 0.005   # 0.5% per trade
-MAX_DAILY_LOSS_PCT = 0.015   # 1.5% per day
-MAX_OPEN_RISK_PCT  = 0.010   # 1.0% total open
-MAX_TRADES_PER_DAY = 3
-MIN_RR             = 1.5
-TRAILING_ACTIVATE  = 0.10    # activate trailing at +10%
-TRAILING_DISTANCE  = 0.05    # trail 5% below high
+# ── Risk constants — COMPETITION MODE ─────────────────────────────────────
+# Sized for a 30-day challenge: bigger positions = bigger wins.
+MAX_RISK_PCT       = 0.02    # 2% per trade ($200 on $10k)
+MAX_DAILY_LOSS_PCT = 0.04    # 4% per day ($400 on $10k)
+MAX_OPEN_RISK_PCT  = 0.04    # 4% total open across all positions
+MAX_TRADES_PER_DAY = 5       # up from 3 — more opportunities
+MIN_RR             = 2.0     # require 2:1 reward-to-risk (higher bar, bigger winners)
+TRAILING_ACTIVATE  = 0.05    # lock in gains earlier — activate trail at +5%
+TRAILING_DISTANCE  = 0.03    # trail 3% below high (was 5% — tighter protection)
 
-# Scan universe for new setups
-WATCH_UNIVERSE = ["XLF", "NVDA", "XLE", "AMD", "AMZN", "SPY", "QQQ"]
+# Scan universe — high-momentum names + leveraged ETFs for competition edge
+WATCH_UNIVERSE = [
+    # Megacap momentum (high beta, liquid, trend well)
+    "NVDA", "AMD", "META", "MSFT", "AAPL", "TSLA", "AMZN", "GOOGL",
+    # Sector ETFs with catalyst exposure
+    "XLF", "XLE", "XLK",
+    # Leveraged ETFs — 3x amplification; huge upside in trending markets
+    "TQQQ", "SOXL",
+    # High-beta individual plays
+    "PLTR", "COIN",
+    # Regime check only — NEVER traded (see REGIME_ONLY below)
+    "SPY", "QQQ",
+]
+
+# These are market health indicators only — the bot will never buy/sell them
+REGIME_ONLY = {"SPY", "QQQ"}
 
 # ── Alpaca helpers ─────────────────────────────────────────────────────────
 def _get(path: str, base: str = BASE_URL) -> dict | list:
@@ -237,6 +252,10 @@ def should_enter(trigger: dict, price: float, tech: dict) -> tuple[bool, str]:
     stop       = trigger.get("stop", 0)
     target_1   = trigger.get("target_1", 0)
 
+    # Skip placeholder triggers that haven't been priced by the scanner yet
+    if not trigger.get("entry_price") or trigger.get("entry_price", 0) == 0:
+        return False, "trigger not yet priced — waiting for scanner"
+
     # Price condition
     if entry_type == "breakout":
         if price < trigger.get("entry_price", 0):
@@ -300,29 +319,57 @@ def update_trailing(trigger: dict, price: float):
 # ── Daily setup scanner ────────────────────────────────────────────────────
 def scan_new_setups(strategy: dict) -> list:
     """Scan WATCH_UNIVERSE for breakout or pullback setups using Skill.md criteria."""
+    # Symbols already priced and active — skip re-scanning these
+    # Symbols with entry_price=0 are placeholders — allow scanner to overwrite them
     active_symbols = {
         t["symbol"] for t in strategy.get("triggers", [])
-        if t.get("status") in ("active", "in_trade")
+        if t.get("status") in ("active", "in_trade") and t.get("entry_price", 0) != 0
     }
+    # Remove placeholder triggers so scanner can replace them with live prices
+    strategy["triggers"] = [
+        t for t in strategy.get("triggers", [])
+        if not (t.get("entry_price", 0) == 0 and t.get("status") == "active")
+    ]
     found = []
 
     for sym in WATCH_UNIVERSE:
-        if sym in active_symbols:
+        if sym in active_symbols or sym in REGIME_ONLY:
             continue
         t = get_tech(sym)
         if not t or not all([t.get("close"), t.get("ma20"), t.get("ma50")]):
             continue
         close, prev, m20, m50 = t["close"], t.get("prev", 0), t["ma20"], t["ma50"]
-        rel_vol = t.get("rel_vol") or 1.0
+        rel_vol  = t.get("rel_vol") or 1.0
+        high_20d = t.get("high_20d") or 0
 
         setup = None
 
-        # Rule 1: fresh 50-MA breakout on volume
-        if close > m50 and prev and prev < m50 and rel_vol >= 1.25:
+        # Rule 1: Momentum breakout — new 20-day high on strong volume in uptrend
+        # Best for high-beta names (NVDA, TSLA, TQQQ, SOXL). Pure price strength.
+        if (high_20d and close >= high_20d * 0.998
+                and rel_vol >= 1.5 and close > m50 and prev and close > prev):
+            stop  = round(max(m20, close * 0.94), 2)   # below 20-MA or -6% floor
+            t1    = round(close * 1.06, 2)              # +6% target
+            t2    = round(close * 1.12, 2)              # +12% target
+            entry = round(close * 1.001, 2)
+            if calc_rr(entry, stop, t1) >= MIN_RR:
+                setup = {
+                    "symbol": sym, "setup_type": "momentum_breakout", "status": "active",
+                    "entry_type": "breakout", "entry_price": entry,
+                    "stop": stop, "target_1": t1, "target_2": t2,
+                    "t1_hit": False, "trailing_active": False,
+                    "trailing_stop": None, "highest_price": None,
+                    "source": "auto_scan",
+                    "detected_at": datetime.now(timezone.utc).isoformat(),
+                    "notes": f"20-day high breakout, rel_vol={rel_vol:.2f}x"
+                }
+
+        # Rule 2: Fresh 50-MA breakout on volume (trend change signal)
+        elif close > m50 and prev and prev < m50 and rel_vol >= 1.25:
             entry  = round(close * 1.002, 2)
             stop   = round(m50 * 0.985, 2)
-            t1     = round(close * 1.04, 2)
-            t2     = round(close * 1.08, 2)
+            t1     = round(close * 1.05, 2)
+            t2     = round(close * 1.10, 2)
             if calc_rr(entry, stop, t1) >= MIN_RR:
                 setup = {
                     "symbol": sym, "setup_type": "breakout_50ma", "status": "active",
@@ -335,10 +382,10 @@ def scan_new_setups(strategy: dict) -> list:
                     "notes": f"50-MA breakout, rel_vol={rel_vol:.2f}x"
                 }
 
-        # Rule 2: pullback to 20-MA within uptrend (price > 50 MA, ma20 > ma50)
+        # Rule 3: Pullback to 20-MA within uptrend — buy the dip at support
         elif close > m50 and m20 > m50:
             dist_to_m20 = abs(close - m20) / m20
-            if dist_to_m20 < 0.015:   # within 1.5% of 20 MA
+            if dist_to_m20 < 0.015:   # within 1.5% of 20-MA
                 entry = round(m20, 2)
                 stop  = round(m50 * 0.988, 2)
                 t1    = round(close * 1.05, 2)
@@ -483,6 +530,8 @@ def run():
                 break
 
             sym = trigger["symbol"]
+            if sym in REGIME_ONLY:
+                continue   # never trade the regime-check ETFs
             if sym in positions or sym in pending_syms:
                 continue
 
