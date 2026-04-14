@@ -20,6 +20,11 @@ TRADE_LOG_FILE  = BASE_DIR / "trade_log.json"
 PERFORMANCE_FILE= BASE_DIR / "performance.json"
 ENV_FILE        = BASE_DIR / ".env"
 LOG_FILE        = BASE_DIR / "bot.log"
+HEARTBEAT_FILE  = BASE_DIR / "heartbeat.json"
+
+# ── Staleness threshold ────────────────────────────────────────────────────
+# Alert if the bot hasn't completed a successful cycle in this many minutes.
+STALE_ALERT_MINUTES = 90
 
 # ── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -196,6 +201,32 @@ def load_performance() -> dict:
 
 def save_performance(p: dict):
     PERFORMANCE_FILE.write_text(json.dumps(p, indent=2))
+
+# ── Heartbeat ──────────────────────────────────────────────────────────────
+def write_heartbeat(status: str = "ok", note: str = ""):
+    """Write a heartbeat file every run so external monitors can check freshness."""
+    hb = {
+        "last_run_utc": datetime.now(timezone.utc).isoformat(),
+        "status": status,
+        "note": note,
+    }
+    HEARTBEAT_FILE.write_text(json.dumps(hb, indent=2))
+
+def check_staleness():
+    """Warn in the log if the previous run was more than STALE_ALERT_MINUTES ago."""
+    if not HEARTBEAT_FILE.exists():
+        return  # first ever run — no history
+    try:
+        hb = json.loads(HEARTBEAT_FILE.read_text())
+        last = datetime.fromisoformat(hb["last_run_utc"])
+        age_minutes = (datetime.now(timezone.utc) - last).total_seconds() / 60
+        if age_minutes > STALE_ALERT_MINUTES:
+            log.warning(
+                f"STALENESS ALERT: last successful run was {age_minutes:.0f} min ago "
+                f"(threshold: {STALE_ALERT_MINUTES} min). Previous status: {hb.get('status')}"
+            )
+    except Exception as e:
+        log.warning(f"Could not check staleness: {e}")
 
 def record_outcome(pnl: float):
     """Increment wins or losses counter when a position fully closes."""
@@ -471,15 +502,20 @@ def run():
     log.info("ALPACA BOT | 30-Day Challenge | Market check starting...")
     log.info("=" * 65)
 
+    # 0. Staleness check — warn if prior run was too long ago
+    check_staleness()
+
     # 1. Market open?
     if not market_is_open():
         log.info("Market is closed. Exiting until next scheduled run.")
+        write_heartbeat("market_closed")
         return
 
     # 2. Account state
     account = get_account()
     if "equity" not in account:
-        log.error("Failed to fetch account. Aborting.")
+        log.error(f"Failed to fetch account. Response: {account}. Aborting.")
+        write_heartbeat("error", "account fetch failed")
         return
 
     equity       = float(account["equity"])
@@ -658,6 +694,7 @@ def run():
     save_strategy(strategy)
     _save_perf_snapshot(equity, daily_pnl)
 
+    write_heartbeat("ok", f"Day PnL=${daily_pnl:+.2f}")
     log.info(f"  Check complete. Day PnL=${daily_pnl:+.2f} | Equity=${equity:,.2f}")
     log.info("=" * 65)
 

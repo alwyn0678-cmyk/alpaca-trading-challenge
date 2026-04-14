@@ -18,8 +18,12 @@ BASE_DIR        = Path(__file__).parent
 STRATEGY_FILE   = BASE_DIR / "strategy.json"
 TRADE_LOG_FILE  = BASE_DIR / "trade_log.json"
 PERFORMANCE_FILE= BASE_DIR / "performance.json"
+HEARTBEAT_FILE  = BASE_DIR / "heartbeat.json"
 ENV_FILE        = BASE_DIR / ".env"
 PORT            = 5050
+
+# Show a warning banner if the bot data is older than this many minutes
+STALE_THRESHOLD_MINUTES = 90
 
 # ── Load credentials ───────────────────────────────────────────────────────
 def load_env():
@@ -97,20 +101,30 @@ def get_live_data():
                     lt = data.get("latestTrade", {})
                     trigger_prices[sym] = lt.get("p", 0)
 
-    # Last run timestamp from strategy.json (written by bot.py after each run)
-    last_run_iso = strategy.get("last_run", "")
+    # Last run timestamp — prefer heartbeat.json (local run), fall back to strategy.json (GHA)
+    heartbeat = {}
+    if HEARTBEAT_FILE.exists():
+        try:
+            heartbeat = json.loads(HEARTBEAT_FILE.read_text())
+        except Exception:
+            pass
+
+    last_run_iso = heartbeat.get("last_run_utc") or strategy.get("last_run", "")
     last_run_str = ""
     last_run_ago = ""
+    last_run_stale = False
+    last_run_mins = None
     if last_run_iso:
         try:
             lr = datetime.fromisoformat(last_run_iso.replace("Z", "+00:00"))
             last_run_str = lr.strftime("%Y-%m-%d %H:%M UTC")
             delta = datetime.now(timezone.utc) - lr
-            mins  = int(delta.total_seconds() // 60)
-            if mins < 60:
-                last_run_ago = f"{mins}m ago"
+            last_run_mins = int(delta.total_seconds() // 60)
+            if last_run_mins < 60:
+                last_run_ago = f"{last_run_mins}m ago"
             else:
-                last_run_ago = f"{mins // 60}h {mins % 60}m ago"
+                last_run_ago = f"{last_run_mins // 60}h {last_run_mins % 60}m ago"
+            last_run_stale = last_run_mins > STALE_THRESHOLD_MINUTES
         except Exception:
             last_run_str = last_run_iso[:16]
 
@@ -132,8 +146,11 @@ def get_live_data():
         "trigger_prices": trigger_prices,
         "challenge_start": strategy.get("challenge_start", ""),
         "challenge_end":   strategy.get("challenge_end", ""),
-        "last_run_str": last_run_str,
-        "last_run_ago": last_run_ago,
+        "last_run_str":   last_run_str,
+        "last_run_ago":   last_run_ago,
+        "last_run_stale": last_run_stale,
+        "last_run_mins":  last_run_mins,
+        "hb_status":      heartbeat.get("status", "unknown"),
         "activity_log": get_activity_log(),
         "now":          datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
     }
@@ -191,6 +208,20 @@ def render_html(d):
         if d["is_open"] else
         '<span class="mkt-badge closed">&#9675; MARKET CLOSED</span>'
     )
+
+    # ── Staleness banner ────────────────────────────────────────────────────
+    if d.get("last_run_stale"):
+        mins = d.get("last_run_mins", "?")
+        staleness_banner = f"""
+<div class="stale-banner">
+  &#9888; Bot data is <strong>{mins} minutes old</strong> (threshold: {STALE_THRESHOLD_MINUTES}m).
+  Local cron and/or GitHub Actions may not be running.
+  Last recorded status: <strong>{d.get('hb_status', 'unknown')}</strong>.
+  Run <code>python bot.py</code> manually to refresh, or check cron/GHA.
+  <a href="/" style="color:inherit;margin-left:12px;text-decoration:underline">&#8635; Refresh page</a>
+</div>"""
+    else:
+        staleness_banner = ""
 
     # ── Performance metrics ────────────────────────────────────────────────
     wins            = d["perf"].get("wins", 0)
@@ -475,6 +506,25 @@ html, body {{
   background: rgba(71,85,105,.12);
   color: var(--text-2);
   border: 1px solid rgba(71,85,105,.25);
+}}
+
+/* ── Staleness banner ─────────────────────────────── */
+.stale-banner {{
+  background: rgba(245,158,11,.12);
+  border-bottom: 1px solid rgba(245,158,11,.3);
+  color: #fbbf24;
+  font-size: 12px;
+  padding: 10px 28px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}}
+.stale-banner code {{
+  background: rgba(245,158,11,.2);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
 }}
 
 .refresh-link {{
@@ -845,6 +895,8 @@ html, body {{
     <a class="refresh-link" href="/">&#8635; Refresh</a>
   </div>
 </header>
+
+{staleness_banner}
 
 <!-- ── Challenge Progress ──────────────────────────────────────────────── -->
 <div class="challenge-bar">
