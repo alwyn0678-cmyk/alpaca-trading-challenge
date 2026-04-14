@@ -64,6 +64,9 @@ def get_live_data():
     start_equity  = perf.get("start_equity", 10000.0)
     account_start = perf.get("account_start_equity", equity)
     total_pnl     = equity - account_start
+    challenge_equity = round(start_equity + total_pnl, 2)
+    open_cost     = sum(float(p.get("cost_basis", 0)) for p in (positions if isinstance(positions, list) else []))
+    challenge_bp  = round(max(0.0, challenge_equity - open_cost), 2)
 
     strategy = json.loads(STRATEGY_FILE.read_text()) if STRATEGY_FILE.exists() else {}
     triggers = strategy.get("triggers", [])
@@ -112,12 +115,14 @@ def get_live_data():
             last_run_str = last_run_iso[:16]
 
     return {
-        "equity":       equity,
-        "cash":         cash,
-        "buying_power": buying_power,
-        "day_pnl":      day_pnl,
-        "total_pnl":    total_pnl,
-        "start_equity": start_equity,
+        "equity":          equity,
+        "challenge_equity": challenge_equity,
+        "challenge_bp":    challenge_bp,
+        "cash":            cash,
+        "buying_power":    buying_power,
+        "day_pnl":         day_pnl,
+        "total_pnl":       total_pnl,
+        "start_equity":    start_equity,
         "is_open":      is_open,
         "positions":    pos_list,
         "orders":       orders_list,
@@ -217,27 +222,20 @@ def render_html(d):
         chart_labels = list(daily.keys())[-30:]
 
     chart_values = [daily.get(lbl, 0) for lbl in chart_labels]
+    # Override today's daily PnL with the live total_pnl minus prior days so chart stays in sync
+    prior_pnl = sum(daily.get(lbl, 0) for lbl in chart_labels if lbl < today_str)
+    if today_str in chart_labels:
+        chart_values[chart_labels.index(today_str)] = round(d["total_pnl"] - prior_pnl, 2)
 
-    # Cumulative P&L line (None for future dates so Chart.js skips them)
-    cum_values = []
-    running = 0.0
+    # Equity curve: portfolio value line starting at start_equity ($10k)
+    equity_curve = []
+    running = d["start_equity"]
     for lbl, v in zip(chart_labels, chart_values):
         if lbl <= today_str:
-            running += v
-            cum_values.append(round(running, 2))
+            running = round(running + v, 2)
+            equity_curve.append(running)
         else:
-            cum_values.append(None)
-
-    chart_colors = []
-    for lbl, v in zip(chart_labels, chart_values):
-        if lbl > today_str:
-            chart_colors.append('"rgba(30,41,59,0.4)"')
-        elif v > 0:
-            chart_colors.append('"rgba(34,197,94,0.85)"')
-        elif v < 0:
-            chart_colors.append('"rgba(239,68,68,0.85)"')
-        else:
-            chart_colors.append('"rgba(51,65,85,0.5)"')
+            equity_curve.append(None)
 
     # Milestone dates
     if c_start:
@@ -874,9 +872,9 @@ html, body {{
 <div class="kpi-grid">
 
   <div class="kpi-card">
-    <div class="kpi-label">Account Equity</div>
-    <div class="kpi-value">${d['equity']:,.2f}</div>
-    <div class="kpi-sub">Started ${d['start_equity']:,.2f}</div>
+    <div class="kpi-label">Challenge Equity</div>
+    <div class="kpi-value">${d['challenge_equity']:,.2f}</div>
+    <div class="kpi-sub">Started $10,000 &nbsp;·&nbsp; Full acct ${d['equity']:,.2f}</div>
   </div>
 
   <div class="kpi-card {pnl_class}">
@@ -892,9 +890,9 @@ html, body {{
   </div>
 
   <div class="kpi-card">
-    <div class="kpi-label">Buying Power</div>
-    <div class="kpi-value">${d['buying_power']:,.2f}</div>
-    <div class="kpi-sub">Cash ${d['cash']:,.2f}</div>
+    <div class="kpi-label">Available Capital</div>
+    <div class="kpi-value">${d['challenge_bp']:,.2f}</div>
+    <div class="kpi-sub">Of $10k challenge allocation</div>
   </div>
 
   <div class="kpi-card">
@@ -915,7 +913,7 @@ html, body {{
 <div class="chart-section">
   <div class="chart-header">
     <div>
-      <div class="chart-title">30-Day P&amp;L Overview</div>
+      <div class="chart-title">30-Day Portfolio Equity Curve</div>
       <div class="chart-legend">
         <span class="legend-item">
           <span class="legend-dot" style="background:rgba(34,197,94,.85)"></span>Profit day
@@ -997,11 +995,10 @@ html, body {{
 <div class="spacer"></div>
 
 <script>
-const labels     = {json.dumps(chart_labels)};
-const values     = {json.dumps(chart_values)};
-const cumValues  = {json.dumps(cum_values)};
-const barColors  = [{",".join(chart_colors)}];
-const milestones = {json.dumps(milestones)};
+const labels      = {json.dumps(chart_labels)};
+const equityCurve = {json.dumps(equity_curve)};
+const startValue  = {d['start_equity']};
+const milestones  = {json.dumps(milestones)};
 
 // Plugin: gold dashed vertical lines at milestone dates
 const milestonePlugin = {{
@@ -1040,30 +1037,40 @@ new Chart(chartCtx, {{
     labels: labels,
     datasets: [
       {{
-        type: "bar",
-        label: "Daily P&L ($)",
-        data: values,
-        backgroundColor: barColors,
-        borderRadius: 4,
-        borderSkipped: false,
-        order: 2,
-        yAxisID: "y",
-      }},
-      {{
         type: "line",
-        label: "Cumulative P&L ($)",
-        data: cumValues,
+        label: "Portfolio Value ($)",
+        data: equityCurve,
         borderColor: "#3b82f6",
-        backgroundColor: "rgba(59,130,246,0.07)",
+        backgroundColor: (ctx) => {{
+          const chart = ctx.chart;
+          const {{ctx: c, chartArea}} = chart;
+          if (!chartArea) return "rgba(59,130,246,0.08)";
+          const gradient = c.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
+          gradient.addColorStop(0,   "rgba(59,130,246,0.18)");
+          gradient.addColorStop(1,   "rgba(59,130,246,0.01)");
+          return gradient;
+        }},
         fill: true,
-        tension: 0.38,
+        tension: 0.3,
         pointRadius: 0,
-        pointHoverRadius: 4,
+        pointHoverRadius: 5,
         pointHoverBackgroundColor: "#3b82f6",
-        borderWidth: 2,
-        order: 1,
-        yAxisID: "y2",
+        pointHoverBorderColor: "#fff",
+        pointHoverBorderWidth: 2,
+        borderWidth: 2.5,
         spanGaps: false,
+        segment: {{
+          borderColor: ctx => {{
+            const v = ctx.p1.parsed.y;
+            if (v === null) return "#3b82f6";
+            return v >= startValue ? "#22c55e" : "#ef4444";
+          }},
+          backgroundColor: ctx => {{
+            const v = ctx.p1.parsed.y;
+            if (v === null) return "rgba(59,130,246,0.05)";
+            return v >= startValue ? "rgba(34,197,94,0.06)" : "rgba(239,68,68,0.06)";
+          }}
+        }}
       }}
     ]
   }},
@@ -1086,9 +1093,9 @@ new Chart(chartCtx, {{
           title: t => t[0].label + (milestones[t[0].label] ? "  · " + milestones[t[0].label] : ""),
           label: c => {{
             if (c.parsed.y === null) return null;
-            const pfx = c.datasetIndex === 0 ? "Daily" : "Cumul";
-            const sign = c.parsed.y >= 0 ? "+" : "";
-            return " " + pfx + ": " + sign + "$" + c.parsed.y.toFixed(2);
+            const pnl  = c.parsed.y - startValue;
+            const sign = pnl >= 0 ? "+" : "";
+            return ` ${{c.parsed.y.toLocaleString("en-US", {{minimumFractionDigits:2, maximumFractionDigits:2}})}}  (P&L: ${{sign}}${{Math.abs(pnl).toFixed(2)}})`;
           }}
         }}
       }}
@@ -1108,16 +1115,7 @@ new Chart(chartCtx, {{
         ticks: {{
           color: "#475569",
           font: {{ size: 9, family: "'Fira Code', monospace" }},
-          callback: v => (v >= 0 ? "+" : "") + "$" + v.toFixed(0)
-        }}
-      }},
-      y2: {{
-        position: "right",
-        grid: {{ display: false }},
-        ticks: {{
-          color: "#3b82f6",
-          font: {{ size: 9, family: "'Fira Code', monospace" }},
-          callback: v => (v >= 0 ? "+" : "") + "$" + v.toFixed(0)
+          callback: v => "$" + v.toLocaleString("en-US", {{minimumFractionDigits:0, maximumFractionDigits:0}})
         }}
       }}
     }}
