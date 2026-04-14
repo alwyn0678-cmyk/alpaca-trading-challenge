@@ -61,8 +61,9 @@ def get_live_data():
     is_open      = clock.get("is_open", False)
 
     perf = json.loads(PERFORMANCE_FILE.read_text()) if PERFORMANCE_FILE.exists() else {}
-    start_equity = perf.get("start_equity", equity)
-    total_pnl    = equity - start_equity
+    start_equity  = perf.get("start_equity", 10000.0)
+    account_start = perf.get("account_start_equity", equity)
+    total_pnl     = equity - account_start
 
     strategy = json.loads(STRATEGY_FILE.read_text()) if STRATEGY_FILE.exists() else {}
     triggers = strategy.get("triggers", [])

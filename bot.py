@@ -139,8 +139,18 @@ def get_latest_price(symbol: str) -> Optional[float]:
     return data.get("trade", {}).get("p")
 
 def get_bars(symbol: str, limit: int = 60) -> list:
-    data = _get(f"/stocks/{symbol}/bars?timeframe=1Day&limit={limit}&feed=iex", base=DATA_URL)
-    return data.get("bars", []) if isinstance(data, dict) else []
+    from datetime import timedelta
+    start = (datetime.now(timezone.utc) - timedelta(days=limit * 2)).strftime("%Y-%m-%d")
+    # Use end=yesterday to exclude today's partial intraday bar from MA/volume calculations.
+    # Including a partial day would make rel_vol appear artificially low all morning.
+    end = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    data = _get(
+        f"/stocks/{symbol}/bars?timeframe=1Day&limit={limit}"
+        f"&start={start}&end={end}&sort=desc&feed=iex",
+        base=DATA_URL,
+    )
+    bars = data.get("bars", []) if isinstance(data, dict) else []
+    return list(reversed(bars))  # oldest-first for MA calculations
 
 def place_order(symbol: str, qty: int, side: str,
                 order_type: str = "market",
@@ -186,6 +196,15 @@ def load_performance() -> dict:
 
 def save_performance(p: dict):
     PERFORMANCE_FILE.write_text(json.dumps(p, indent=2))
+
+def record_outcome(pnl: float):
+    """Increment wins or losses counter when a position fully closes."""
+    perf = load_performance()
+    if pnl > 0:
+        perf["wins"] = perf.get("wins", 0) + 1
+    else:
+        perf["losses"] = perf.get("losses", 0) + 1
+    save_performance(perf)
 
 # ── Technical helpers ──────────────────────────────────────────────────────
 def ma(closes: list, period: int) -> Optional[float]:
@@ -268,12 +287,14 @@ def should_enter(trigger: dict, price: float, tech: dict) -> tuple[bool, str]:
     else:
         return False, "unknown entry type"
 
-    # R:R gate
-    rr = calc_rr(price, stop, target_1)
+    # R:R gate — pullback entries plan to buy AT the MA level (entry_price),
+    # not at the current bid. Use entry_price so the gate matches the scanner.
+    entry_for_rr = trigger.get("entry_price", price) if entry_type == "pullback" else price
+    rr = calc_rr(entry_for_rr, stop, target_1)
     if rr < MIN_RR:
         return False, f"R:R {rr:.2f} < minimum {MIN_RR}"
 
-    # Volume gate
+    # Volume gate — use completed-day rel_vol (today's partial bar excluded via get_bars end date)
     rel_vol = tech.get("rel_vol") or 1.0
     if rel_vol < 0.4:
         return False, f"volume too low ({rel_vol:.2f}x) — no conviction"
@@ -334,25 +355,32 @@ def scan_new_setups(strategy: dict) -> list:
 
     for sym in WATCH_UNIVERSE:
         if sym in active_symbols or sym in REGIME_ONLY:
+            log.info(f"  SCAN {sym}: skipped (already active or regime-only)")
             continue
         t = get_tech(sym)
         if not t or not all([t.get("close"), t.get("ma20"), t.get("ma50")]):
+            log.warning(f"  SCAN {sym}: skipped — missing technical data")
             continue
         close, prev, m20, m50 = t["close"], t.get("prev", 0), t["ma20"], t["ma50"]
         rel_vol  = t.get("rel_vol") or 1.0
         high_20d = t.get("high_20d") or 0
 
+        log.info(f"  SCAN {sym}: close={close:.2f} ma20={m20:.2f} ma50={m50:.2f} "
+                 f"rel_vol={rel_vol:.2f}x high_20d={high_20d:.2f}")
+
         setup = None
+        skip_reason = None
 
         # Rule 1: Momentum breakout — new 20-day high on strong volume in uptrend
-        # Best for high-beta names (NVDA, TSLA, TQQQ, SOXL). Pure price strength.
+        # Relaxed: rel_vol 1.5→1.2 to catch more setups in recovering markets
         if (high_20d and close >= high_20d * 0.998
-                and rel_vol >= 1.5 and close > m50 and prev and close > prev):
+                and rel_vol >= 1.2 and close > m50 and prev and close > prev):
             stop  = round(max(m20, close * 0.94), 2)   # below 20-MA or -6% floor
             t1    = round(close * 1.06, 2)              # +6% target
             t2    = round(close * 1.12, 2)              # +12% target
             entry = round(close * 1.001, 2)
-            if calc_rr(entry, stop, t1) >= MIN_RR:
+            rr    = calc_rr(entry, stop, t1)
+            if rr >= MIN_RR:
                 setup = {
                     "symbol": sym, "setup_type": "momentum_breakout", "status": "active",
                     "entry_type": "breakout", "entry_price": entry,
@@ -363,39 +391,53 @@ def scan_new_setups(strategy: dict) -> list:
                     "detected_at": datetime.now(timezone.utc).isoformat(),
                     "notes": f"20-day high breakout, rel_vol={rel_vol:.2f}x"
                 }
+            else:
+                skip_reason = f"momentum_breakout R:R {rr:.2f} < {MIN_RR} (entry={entry} stop={stop} T1={t1})"
+        elif high_20d and close >= high_20d * 0.998 and rel_vol < 1.2:
+            skip_reason = f"near 20d-high but rel_vol {rel_vol:.2f}x < 1.2x"
+        elif high_20d and close >= high_20d * 0.998 and close <= m50:
+            skip_reason = f"near 20d-high but price {close:.2f} below MA50 {m50:.2f}"
 
         # Rule 2: Fresh 50-MA breakout on volume (trend change signal)
-        elif close > m50 and prev and prev < m50 and rel_vol >= 1.25:
-            entry  = round(close * 1.002, 2)
-            stop   = round(m50 * 0.985, 2)
-            t1     = round(close * 1.05, 2)
-            t2     = round(close * 1.10, 2)
-            if calc_rr(entry, stop, t1) >= MIN_RR:
-                setup = {
-                    "symbol": sym, "setup_type": "breakout_50ma", "status": "active",
-                    "entry_type": "breakout", "entry_price": entry,
-                    "stop": stop, "target_1": t1, "target_2": t2,
-                    "t1_hit": False, "trailing_active": False,
-                    "trailing_stop": None, "highest_price": None,
-                    "source": "auto_scan",
-                    "detected_at": datetime.now(timezone.utc).isoformat(),
-                    "notes": f"50-MA breakout, rel_vol={rel_vol:.2f}x"
-                }
+        if not setup and close > m50 and prev and prev < m50:
+            if rel_vol >= 1.2:
+                entry  = round(close * 1.002, 2)
+                stop   = round(m50 * 0.985, 2)
+                t1     = round(close * 1.05, 2)
+                t2     = round(close * 1.10, 2)
+                rr     = calc_rr(entry, stop, t1)
+                if rr >= MIN_RR:
+                    setup = {
+                        "symbol": sym, "setup_type": "breakout_50ma", "status": "active",
+                        "entry_type": "breakout", "entry_price": entry,
+                        "stop": stop, "target_1": t1, "target_2": t2,
+                        "t1_hit": False, "trailing_active": False,
+                        "trailing_stop": None, "highest_price": None,
+                        "source": "auto_scan",
+                        "detected_at": datetime.now(timezone.utc).isoformat(),
+                        "notes": f"50-MA breakout, rel_vol={rel_vol:.2f}x"
+                    }
+                else:
+                    skip_reason = f"50ma_breakout R:R {rr:.2f} < {MIN_RR}"
+            else:
+                skip_reason = f"50MA crossover but rel_vol {rel_vol:.2f}x < 1.2x"
 
         # Rule 3: Pullback to 20-MA within uptrend — buy the dip at support
-        elif close > m50 and m20 > m50:
+        # Relaxed: proximity window 1.5%→2.5% to catch more pullbacks
+        if not setup and close > m50 and m20 > m50:
             dist_to_m20 = abs(close - m20) / m20
-            if dist_to_m20 < 0.015:   # within 1.5% of 20-MA
+            if dist_to_m20 < 0.025:   # within 2.5% of 20-MA (was 1.5%)
                 entry = round(m20, 2)
                 stop  = round(m50 * 0.988, 2)
                 t1    = round(close * 1.05, 2)
                 t2    = round(close * 1.10, 2)
-                if calc_rr(entry, stop, t1) >= MIN_RR:
+                rr    = calc_rr(entry, stop, t1)
+                if rr >= MIN_RR:
                     setup = {
                         "symbol": sym, "setup_type": "pullback_20ma", "status": "active",
                         "entry_type": "pullback",
                         "pullback_low":  round(m20 * 0.990, 2),
-                        "pullback_high": round(m20 * 1.015, 2),
+                        "pullback_high": round(m20 * 1.025, 2),
                         "entry_price": entry,
                         "stop": stop, "target_1": t1, "target_2": t2,
                         "t1_hit": False, "trailing_active": False,
@@ -404,11 +446,22 @@ def scan_new_setups(strategy: dict) -> list:
                         "detected_at": datetime.now(timezone.utc).isoformat(),
                         "notes": f"Pullback to 20-MA in uptrend, dist={dist_to_m20:.2%}"
                     }
+                else:
+                    skip_reason = f"pullback_20ma R:R {rr:.2f} < {MIN_RR}"
+            elif close > m50 and m20 > m50:
+                skip_reason = f"uptrend but dist_to_ma20 {dist_to_m20:.2%} > 2.5%"
+        elif not setup and not skip_reason:
+            if close <= m50:
+                skip_reason = f"price {close:.2f} below MA50 {m50:.2f} — no uptrend"
+            elif m20 <= m50:
+                skip_reason = f"MA20 {m20:.2f} <= MA50 {m50:.2f} — trend not established"
 
         if setup:
             log.info(f"  NEW SETUP: {sym} | {setup['setup_type']} | "
                      f"entry={setup['entry_price']} stop={setup['stop']} T1={setup['target_1']}")
             found.append(setup)
+        elif skip_reason:
+            log.info(f"  SCAN {sym}: no setup — {skip_reason}")
 
     return found
 
@@ -490,6 +543,7 @@ def run():
             pnl = (price - entry) * qty
             log_trade({"action": "STOP_LOSS", "symbol": sym, "qty": qty,
                        "price": price, "entry": entry, "pnl": round(pnl, 2)})
+            record_outcome(pnl)
 
         elif action == "target_1" and sym not in pending_syms:
             half = max(qty // 2, 1)
@@ -511,6 +565,7 @@ def run():
             pnl = (price - entry) * remainder
             log_trade({"action": "TRAILING_STOP", "symbol": sym, "qty": remainder,
                        "price": price, "entry": entry, "pnl": round(pnl, 2)})
+            record_outcome(pnl)
         else:
             t_stop = trigger.get("trailing_stop")
             t_str  = f"trail=${t_stop:.2f}" if t_stop else "trail=inactive"
@@ -544,19 +599,30 @@ def run():
             enter, reason = should_enter(trigger, price, tech)
 
             if enter:
-                qty = size_position(CHALLENGE_CAPITAL, price, trigger["stop"])
-                cost = qty * price
+                # For pullback entries use a limit order at the planned MA entry level.
+                # For breakout entries use a market order (momentum — don't miss the move).
+                entry_type = trigger.get("entry_type", "breakout")
+                planned_entry = trigger.get("entry_price", price)
+                order_type  = "limit"    if entry_type == "pullback" else "market"
+                limit_price = planned_entry if entry_type == "pullback" else None
+
+                # Size from planned entry price for pullbacks (that's the actual risk basis)
+                sizing_price = planned_entry if entry_type == "pullback" else price
+                qty = size_position(CHALLENGE_CAPITAL, sizing_price, trigger["stop"])
+                cost = qty * (limit_price or price)
                 if cost > challenge_bp * 0.90:
-                    qty = max(int(challenge_bp * 0.90 / price), 0)
+                    qty = max(int(challenge_bp * 0.90 / (limit_price or price)), 0)
                 if qty <= 0:
                     log.warning(f"  {sym}: size=0 — skipping.")
                     continue
 
-                rr = calc_rr(price, trigger["stop"], trigger["target_1"])
-                log.info(f"  {sym}: ENTERING | price=${price:.2f} | qty={qty} | "
+                # Log R:R from planned entry (consistent with how should_enter evaluated it)
+                rr = calc_rr(planned_entry, trigger["stop"], trigger["target_1"])
+                order_desc = f"LIMIT@{limit_price:.2f}" if order_type == "limit" else f"MARKET@{price:.2f}"
+                log.info(f"  {sym}: ENTERING | {order_desc} | qty={qty} | "
                          f"stop=${trigger['stop']:.2f} | T1=${trigger['target_1']:.2f} | R:R={rr:.2f}")
 
-                order = place_order(sym, qty, "buy")
+                order = place_order(sym, qty, "buy", order_type=order_type, limit_price=limit_price)
                 if order.get("id"):
                     trigger["status"]       = "in_trade"
                     trigger["actual_entry"] = price
@@ -599,10 +665,12 @@ def run():
 def _save_perf_snapshot(equity: float, daily_pnl: float):
     perf = load_performance()
     today = datetime.now(timezone.utc).date().isoformat()
-    if not perf.get("start_equity"):
-        perf["start_equity"] = equity
-    perf["account_value"]        = round(equity, 2)
-    perf["total_pnl"]            = round(equity - perf["start_equity"], 2)
+    # One-time: capture the real Alpaca account equity at challenge start
+    if not perf.get("account_start_equity"):
+        perf["account_start_equity"] = equity
+    pnl = round(equity - perf["account_start_equity"], 2)
+    perf["account_value"]        = round(CHALLENGE_CAPITAL + pnl, 2)
+    perf["total_pnl"]            = pnl
     perf["daily_pnl"][today]     = round(daily_pnl, 2)
     save_performance(perf)
 
