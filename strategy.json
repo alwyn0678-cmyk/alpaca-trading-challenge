@@ -1,7 +1,7 @@
 {
   "challenge_start": "2026-04-13",
   "challenge_end": "2026-05-13",
-  "last_scan_date": "2026-04-14",
+  "last_scan_date": "2026-04-15",
   "trades_today": {
     "2026-04-14": 1
   },
@@ -24,7 +24,24 @@
       "source": "scanner",
       "notes": "Pullback to 20-MA on recovering market. Limit entry at MA20 level.",
       "detected_at": "2026-04-14T14:10:00Z"
+    },
+    {
+      "symbol": "MSFT",
+      "setup_type": "breakout_50ma",
+      "status": "active",
+      "entry_type": "breakout",
+      "entry_price": 393.81,
+      "stop": 386.25,
+      "target_1": 412.67,
+      "target_2": 432.32,
+      "t1_hit": false,
+      "trailing_active": false,
+      "trailing_stop": null,
+      "highest_price": null,
+      "source": "auto_scan",
+      "detected_at": "2026-04-15T15:04:11.464264+00:00",
+      "notes": "50-MA breakout, rel_vol=1.20x"
     }
   ],
-  "last_run": "2026-04-14T19:10:59.050582+00:00"
+  "last_run": "2026-04-15T15:04:14.798796+00:00"
 }
