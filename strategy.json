@@ -17,8 +17,8 @@
       "target_2": 202.99,
       "t1_hit": true,
       "trailing_active": true,
-      "trailing_stop": 189.59,
-      "highest_price": 195.45,
+      "trailing_stop": 190.03,
+      "highest_price": 195.905,
       "actual_entry": 184.81,
       "qty": 24,
       "source": "scanner",
@@ -60,5 +60,5 @@
       "notes": "50-MA breakout, rel_vol=1.62x"
     }
   ],
-  "last_run": "2026-04-16T15:23:40.545277+00:00"
+  "last_run": "2026-04-16T17:11:48.678638+00:00"
 }
