@@ -1,3 +1,4 @@
 {"action": "ENTRY", "symbol": "COIN", "qty": 24, "price": 184.77, "stop": 176.73, "target_1": 193.77, "target_2": 202.99, "setup_type": "pullback_20ma", "rr": 1.12, "order_id": "457d5748-dff6-48fe-85f4-5a626a5900f0", "regime": "recovering", "timestamp": "2026-04-14T14:18:48.698374+00:00"}
 {"action": "TARGET_1", "symbol": "COIN", "qty": 12, "price": 194.355, "entry": 184.81, "pnl": 114.54, "timestamp": "2026-04-15T19:13:14.820258+00:00"}
 {"action": "TRAILING_STOP", "symbol": "COIN", "qty": 6, "price": 206.8801, "entry": 184.81, "pnl": 132.42, "timestamp": "2026-04-17T18:57:13.053195+00:00"}
+{"action": "ENTRY", "symbol": "PLTR", "qty": 62, "price": 144.54, "stop": 141.72, "target_1": 153.69, "target_2": 161.01, "setup_type": "pullback_20ma", "rr": 3.52, "order_id": "ffda1033-72f9-484e-a9a2-da24601df240", "regime": "recovering", "timestamp": "2026-04-20T15:15:12.755905+00:00"}

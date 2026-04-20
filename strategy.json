@@ -3,7 +3,8 @@
   "challenge_end": "2026-05-13",
   "last_scan_date": "2026-04-20",
   "trades_today": {
-    "2026-04-14": 1
+    "2026-04-14": 1,
+    "2026-04-20": 1
   },
   "triggers": [
     {
@@ -62,7 +63,7 @@
     {
       "symbol": "PLTR",
       "setup_type": "pullback_20ma",
-      "status": "active",
+      "status": "in_trade",
       "entry_type": "pullback",
       "pullback_low": 142.92,
       "pullback_high": 147.98,
@@ -76,8 +77,10 @@
       "highest_price": null,
       "source": "auto_scan",
       "detected_at": "2026-04-20T14:50:43.434284+00:00",
-      "notes": "Pullback to 20-MA in uptrend, dist=1.39%"
+      "notes": "Pullback to 20-MA in uptrend, dist=1.39%",
+      "actual_entry": 144.54,
+      "qty": 62
     }
   ],
-  "last_run": "2026-04-20T14:50:43.679456+00:00"
+  "last_run": "2026-04-20T15:15:12.756199+00:00"
 }
