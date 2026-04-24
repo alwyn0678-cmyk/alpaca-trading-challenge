@@ -3,3 +3,4 @@
 {"action": "TRAILING_STOP", "symbol": "COIN", "qty": 6, "price": 206.8801, "entry": 184.81, "pnl": 132.42, "timestamp": "2026-04-17T18:57:13.053195+00:00"}
 {"action": "ENTRY", "symbol": "PLTR", "qty": 62, "price": 144.54, "stop": 141.72, "target_1": 153.69, "target_2": 161.01, "setup_type": "pullback_20ma", "rr": 3.52, "order_id": "ffda1033-72f9-484e-a9a2-da24601df240", "regime": "recovering", "timestamp": "2026-04-20T15:15:12.755905+00:00"}
 {"action": "STOP_LOSS", "symbol": "PLTR", "qty": 62, "price": 140.615, "entry": 144.54, "pnl": -243.35, "timestamp": "2026-04-24T15:06:15.906621+00:00"}
+{"action": "ENTRY", "symbol": "XLF", "qty": 177, "price": 51.495, "stop": 50.11, "target_1": 54.37, "target_2": 56.96, "setup_type": "pullback_20ma", "rr": 5.36, "order_id": "f4e8777b-012f-4025-85a7-72da19eac820", "regime": "trending_up", "timestamp": "2026-04-24T16:53:20.205239+00:00"}
