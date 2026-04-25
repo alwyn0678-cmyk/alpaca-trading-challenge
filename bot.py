@@ -77,6 +77,8 @@ MAX_TRADES_PER_DAY = 5       # up from 3 — more opportunities
 MIN_RR             = 2.0     # require 2:1 reward-to-risk (higher bar, bigger winners)
 TRAILING_ACTIVATE  = 0.05    # lock in gains earlier — activate trail at +5%
 TRAILING_DISTANCE  = 0.03    # trail 3% below high (was 5% — tighter protection)
+PEAK_DRAWDOWN_FRAC = 0.3     # flatten everything if account gives back >30% of peak gains
+PEAK_DRAWDOWN_MIN  = 300.0   # only enforce once peak gain exceeds this (avoid noise)
 
 # Scan universe — high-momentum names + leveraged ETFs for competition edge
 WATCH_UNIVERSE = [
@@ -546,7 +548,63 @@ def run():
     log.info(f"  Open positions: {list(positions.keys()) or 'none'}")
     log.info(f"  Trades today: {trades_today}/{MAX_TRADES_PER_DAY}")
 
+    # ── STEP A0: Account-level drawdown stop ───────────────────────────────
+    # If we gave back > PEAK_DRAWDOWN_FRAC of peak gains, flatten everything.
+    perf = load_performance()
+    peak_equity = max(perf.get("peak_equity", equity), equity)
+    perf["peak_equity"] = peak_equity
+    acct_start = perf.get("account_start_equity") or equity
+    peak_gain  = peak_equity - acct_start
+    cur_gain   = equity - acct_start
+    if peak_gain >= PEAK_DRAWDOWN_MIN and cur_gain < peak_gain * (1 - PEAK_DRAWDOWN_FRAC):
+        log.warning(f"  ACCOUNT DRAWDOWN — peak gain ${peak_gain:.2f}, current ${cur_gain:.2f}. Flattening.")
+        for sym, pos in positions.items():
+            qty = abs(int(float(pos["qty"])))
+            if qty > 0 and sym not in pending_syms:
+                place_order(sym, qty, "sell")
+                log_trade({"action": "ACCOUNT_DRAWDOWN_FLATTEN", "symbol": sym,
+                           "qty": qty, "price": float(pos["current_price"]),
+                           "peak_gain": round(peak_gain, 2),
+                           "cur_gain":  round(cur_gain, 2)})
+        for trigger in strategy["triggers"]:
+            if trigger.get("status") in ("in_trade", "active"):
+                trigger["status"] = "closed"
+        save_performance(perf)
+        save_strategy(strategy)
+        write_heartbeat("drawdown_flatten",
+                        f"peak +${peak_gain:.0f} → +${cur_gain:.0f}")
+        return
+    save_performance(perf)
+
     # ── STEP A: Manage open positions ──────────────────────────────────────
+    # Re-attach orphan Alpaca positions: any symbol Alpaca shows us holding that
+    # has no matching in_trade trigger gets its trigger flipped back to in_trade
+    # so manage_exits processes it. Prevents leftover shares from going unmanaged.
+    in_trade_syms = {t["symbol"] for t in strategy["triggers"] if t.get("status") == "in_trade"}
+    for sym in positions:
+        if sym in in_trade_syms:
+            continue
+        existing = next((t for t in strategy["triggers"] if t["symbol"] == sym), None)
+        if existing:
+            log.warning(f"  {sym}: orphan Alpaca position re-attached to existing trigger")
+            existing["status"] = "in_trade"
+        else:
+            log.warning(f"  {sym}: orphan Alpaca position with no trigger — adding minimal trigger")
+            pos = positions[sym]
+            avg = float(pos.get("avg_entry_price", pos.get("current_price", 0)))
+            strategy["triggers"].append({
+                "symbol": sym, "status": "in_trade", "entry_type": "orphan",
+                "entry_price": avg, "actual_entry": avg,
+                "stop": round(avg * 0.94, 2),
+                "target_1": 0, "target_2": 0,
+                "t1_hit": True, "trailing_active": True,
+                "highest_price": float(pos["current_price"]),
+                "trailing_stop": round(float(pos["current_price"]) * (1 - TRAILING_DISTANCE), 2),
+                "qty": abs(int(float(pos["qty"]))),
+                "source": "orphan_recovery",
+                "detected_at": datetime.now(timezone.utc).isoformat(),
+            })
+
     for trigger in strategy["triggers"]:
         if trigger["status"] != "in_trade":
             continue
@@ -594,7 +652,9 @@ def run():
                        "price": price, "entry": entry, "pnl": round(pnl, 2)})
 
         elif action == "trailing_stop" and sym not in pending_syms:
-            remainder = (qty // 2) if trigger.get("t1_hit") else qty
+            # Sell whatever Alpaca actually shows us holding — earlier code halved the
+            # remainder again when t1_hit was true, leaving orphan shares unmanaged.
+            remainder = qty
             log.info(f"  {sym}: TRAILING STOP — selling {remainder} shares. {reason}")
             order = place_order(sym, remainder, "sell")
             trigger["status"] = "closed"

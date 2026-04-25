@@ -44,12 +44,20 @@ DATA_URL   = "https://data.alpaca.markets/v2"
 HEADERS    = {"APCA-API-KEY-ID": API_KEY, "APCA-API-SECRET-KEY": SECRET_KEY}
 
 def alpaca_get(path, base=None):
+    url = f"{base or BASE_URL}{path}"
     try:
-        url = f"{base or BASE_URL}{path}"
-        r   = requests.get(url, headers=HEADERS, timeout=8)
-        return r.json()
-    except:
+        r = requests.get(url, headers=HEADERS, timeout=8)
+    except requests.RequestException as e:
+        print(f"[alpaca_get] network error {url}: {e}")
         return {}
+    try:
+        body = r.json()
+    except ValueError:
+        print(f"[alpaca_get] non-JSON response {url}: HTTP {r.status_code}")
+        return {}
+    if r.status_code >= 400:
+        print(f"[alpaca_get] HTTP {r.status_code} {url}: {body}")
+    return body
 
 def get_live_data():
     account   = alpaca_get("/account")
@@ -89,17 +97,27 @@ def get_live_data():
     pos_list = positions if isinstance(positions, list) else []
     orders_list = orders if isinstance(orders, list) else []
 
-    # Get prices for active triggers
+    # Live prices for every trigger (active + in_trade); position symbols come from the positions endpoint
     trigger_prices = {}
-    active_syms = [t["symbol"] for t in triggers if t.get("status") == "active"]
-    if active_syms:
-        syms_str = ",".join(active_syms)
+    trig_syms = sorted({t.get("symbol", "") for t in triggers if t.get("symbol")})
+    if trig_syms:
+        syms_str = ",".join(trig_syms)
         snaps = alpaca_get(f"/stocks/snapshots?symbols={syms_str}&feed=iex", base=DATA_URL)
         if isinstance(snaps, dict):
-            for sym, data in snaps.items():
-                if isinstance(data, dict):
-                    lt = data.get("latestTrade", {})
-                    trigger_prices[sym] = lt.get("p", 0)
+            for sym, snap in snaps.items():
+                if not isinstance(snap, dict):
+                    continue
+                # Prefer latestTrade; fall back to minuteBar close or dailyBar close for off-hours
+                price = (snap.get("latestTrade") or {}).get("p")
+                if not price:
+                    price = (snap.get("minuteBar") or {}).get("c")
+                if not price:
+                    price = (snap.get("dailyBar") or {}).get("c")
+                if price:
+                    trigger_prices[sym] = float(price)
+
+    # Portfolio history drives the real equity curve (account-level, then rebased to the $10k challenge)
+    port_hist = alpaca_get("/account/portfolio/history?period=1M&timeframe=1D")
 
     # Last run timestamp — prefer heartbeat.json (local run), fall back to strategy.json (GHA)
     heartbeat = {}
@@ -128,6 +146,8 @@ def get_live_data():
         except Exception:
             last_run_str = last_run_iso[:16]
 
+    unrealized_pl = sum(float(p.get("unrealized_pl", 0) or 0) for p in pos_list)
+
     return {
         "equity":          equity,
         "challenge_equity": challenge_equity,
@@ -136,13 +156,16 @@ def get_live_data():
         "buying_power":    buying_power,
         "day_pnl":         day_pnl,
         "total_pnl":       total_pnl,
+        "unrealized_pl":   unrealized_pl,
         "start_equity":    start_equity,
+        "account_start_equity": account_start,
         "is_open":      is_open,
         "positions":    pos_list,
         "orders":       orders_list,
         "triggers":     triggers,
         "trades":       trades,
         "perf":         perf,
+        "port_hist":    port_hist if isinstance(port_hist, dict) else {},
         "trigger_prices": trigger_prices,
         "challenge_start": strategy.get("challenge_start", ""),
         "challenge_end":   strategy.get("challenge_end", ""),
@@ -210,11 +233,12 @@ def render_html(d):
     )
 
     # ── Staleness banner ────────────────────────────────────────────────────
-    if d.get("last_run_stale"):
+    # Only warn when the market is currently open — weekends/after-hours staleness is expected
+    if d.get("last_run_stale") and d.get("is_open"):
         mins = d.get("last_run_mins", "?")
         staleness_banner = f"""
 <div class="stale-banner">
-  &#9888; Bot data is <strong>{mins} minutes old</strong> (threshold: {STALE_THRESHOLD_MINUTES}m).
+  &#9888; Market is open but bot data is <strong>{mins} minutes old</strong> (threshold: {STALE_THRESHOLD_MINUTES}m).
   Local cron and/or GitHub Actions may not be running.
   Last recorded status: <strong>{d.get('hb_status', 'unknown')}</strong>.
   Run <code>python bot.py</code> manually to refresh, or check cron/GHA.
@@ -230,13 +254,20 @@ def render_html(d):
     win_rate        = (wins / total_completed * 100) if total_completed > 0 else 0
     total_return_pct = (d["total_pnl"] / d["start_equity"] * 100) if d["start_equity"] else 0
     win_rate_color  = "var(--green)" if win_rate >= 50 else "var(--red)"
+    entry_count     = sum(1 for t in d["trades"] if t.get("action") == "ENTRY")
+    # Daily loss limit matches bot.py MAX_DAILY_LOSS_PCT = 4% of the $10k challenge capital
+    daily_loss_limit = d["start_equity"] * 0.04
+    unrealized      = d.get("unrealized_pl", 0.0)
+    unrealized_sign = "+" if unrealized >= 0 else "−"
 
     # ── Challenge progress ─────────────────────────────────────────────────
+    # Use UTC throughout so the chart/progress match the UTC-labeled "now" header
+    today_utc = datetime.now(timezone.utc).date()
+    today_str = today_utc.isoformat()
     c_start   = d.get("challenge_start", "")
-    today_str = _date.today().isoformat()
     if c_start:
         start_d      = _date.fromisoformat(c_start)
-        days_elapsed = max(0, (_date.today() - start_d).days + 1)
+        days_elapsed = max(0, (today_utc - start_d).days + 1)
         progress_pct = min(100.0, days_elapsed / 30 * 100)
         days_left    = max(0, 30 - days_elapsed)
     else:
@@ -245,28 +276,76 @@ def render_html(d):
         days_left    = 30
 
     # ── Chart data ─────────────────────────────────────────────────────────
-    daily = d["perf"].get("daily_pnl", {})
+    # Build 30-day labels anchored to challenge_start
     if c_start:
         start_d = _date.fromisoformat(c_start)
         chart_labels = [(start_d + _td(days=i)).isoformat() for i in range(30)]
     else:
-        chart_labels = list(daily.keys())[-30:]
+        chart_labels = []
 
-    chart_values = [daily.get(lbl, 0) for lbl in chart_labels]
-    # Override today's daily PnL with the live total_pnl minus prior days so chart stays in sync
-    prior_pnl = sum(daily.get(lbl, 0) for lbl in chart_labels if lbl < today_str)
-    if today_str in chart_labels:
-        chart_values[chart_labels.index(today_str)] = round(d["total_pnl"] - prior_pnl, 2)
+    # Prefer Alpaca's portfolio/history for a real daily equity curve;
+    # rebase account equity into the $10k challenge view:
+    #   challenge_equity(day) = start_equity + (account_equity(day) - account_start_equity)
+    ph            = d.get("port_hist") or {}
+    ph_equity     = ph.get("equity") or []
+    ph_ts         = ph.get("timestamp") or []
+    account_start = d.get("account_start_equity") or 0
+    history_by_date = {}
+    for ts, eq in zip(ph_ts, ph_equity):
+        if not eq:  # skip pre-funding zeros
+            continue
+        dt = datetime.fromtimestamp(ts, tz=timezone.utc).date().isoformat()
+        history_by_date[dt] = round(d["start_equity"] + (float(eq) - account_start), 2)
 
-    # Equity curve: portfolio value line starting at start_equity ($10k)
+    # Fallback to realized daily_pnl if portfolio history is unavailable
+    daily = d["perf"].get("daily_pnl", {})
+
     equity_curve = []
     running = d["start_equity"]
-    for lbl, v in zip(chart_labels, chart_values):
-        if lbl <= today_str:
-            running = round(running + v, 2)
+    for lbl in chart_labels:
+        if lbl in history_by_date:
+            running = history_by_date[lbl]
+            equity_curve.append(running)
+        elif lbl < today_str:
+            # Before today, carry forward — or apply realized PnL if no history
+            running = round(running + daily.get(lbl, 0), 2)
+            equity_curve.append(running)
+        elif lbl == today_str:
+            # Today: always anchor to the live challenge equity
+            running = round(d["challenge_equity"], 2)
             equity_curve.append(running)
         else:
             equity_curve.append(None)
+
+    # Peak (high water mark) curve — tracks the maximum seen so far
+    peak_curve, peak = [], d["start_equity"]
+    for v in equity_curve:
+        if v is None:
+            peak_curve.append(None)
+        else:
+            peak = max(peak, v)
+            peak_curve.append(peak)
+
+    # Daily P&L bars — derived from the equity curve so it matches the line exactly
+    daily_pnl_bars = []
+    prev = d["start_equity"]
+    for v in equity_curve:
+        if v is None:
+            daily_pnl_bars.append(None)
+        else:
+            daily_pnl_bars.append(round(v - prev, 2))
+            prev = v
+
+    # Short x-axis labels: "Apr 13" instead of ISO
+    short_labels = []
+    for lbl in chart_labels:
+        try:
+            short_labels.append(_date.fromisoformat(lbl).strftime("%b %-d"))
+        except ValueError:
+            short_labels.append(lbl)
+
+    today_idx = chart_labels.index(today_str) if today_str in chart_labels else -1
+
 
     # Milestone dates
     if c_start:
@@ -933,12 +1012,13 @@ html, body {{
     <div class="kpi-label">Total P&amp;L</div>
     <div class="kpi-value" style="color:{pnl_color}">${d['total_pnl']:+,.2f}</div>
     <span class="kpi-badge {'up' if d['total_pnl'] >= 0 else 'down'}">{total_return_pct:+.2f}% return</span>
+    <div class="kpi-sub">Unrealized {unrealized_sign}${abs(unrealized):,.2f}</div>
   </div>
 
   <div class="kpi-card {day_class}">
     <div class="kpi-label">Today's P&amp;L</div>
     <div class="kpi-value" style="color:{day_color}">${d['day_pnl']:+,.2f}</div>
-    <div class="kpi-sub">Daily limit &minus;${d['start_equity']*0.015:,.0f}</div>
+    <div class="kpi-sub">Daily loss limit &minus;${daily_loss_limit:,.0f} (4%)</div>
   </div>
 
   <div class="kpi-card">
@@ -950,7 +1030,7 @@ html, body {{
   <div class="kpi-card">
     <div class="kpi-label">Win Rate</div>
     <div class="kpi-value" style="color:{win_rate_color}">{win_rate:.0f}%</div>
-    <div class="kpi-sub">{wins}W &middot; {losses}L &middot; {len(d['trades'])} trades</div>
+    <div class="kpi-sub">{wins}W &middot; {losses}L &middot; {entry_count} entries</div>
   </div>
 
   <div class="kpi-card">
@@ -961,20 +1041,20 @@ html, body {{
 
 </div>
 
-<!-- ── P&L Chart ─────────────────────────────────────────────────────────── -->
+<!-- ── Equity Curve ─────────────────────────────────────────────────────── -->
 <div class="chart-section">
   <div class="chart-header">
     <div>
       <div class="chart-title">30-Day Portfolio Equity Curve</div>
       <div class="chart-legend">
         <span class="legend-item">
-          <span class="legend-dot" style="background:rgba(34,197,94,.85)"></span>Profit day
+          <span class="legend-line" style="background:#3b82f6"></span>Equity
         </span>
         <span class="legend-item">
-          <span class="legend-dot" style="background:rgba(239,68,68,.85)"></span>Loss day
+          <span class="legend-line" style="background:#22c55e;opacity:.55"></span>Peak (high water)
         </span>
         <span class="legend-item">
-          <span class="legend-line" style="background:#3b82f6"></span>Cumulative P&amp;L
+          <span class="legend-line" style="background:#64748b;height:2px;border-top:1px dashed #64748b"></span>Starting $10k
         </span>
         <span class="legend-item">
           <span class="legend-line" style="background:#f59e0b;height:2px;border-top:1px dashed #f59e0b"></span>Milestones
@@ -982,7 +1062,25 @@ html, body {{
       </div>
     </div>
   </div>
-  <canvas id="pnlChart" height="80"></canvas>
+  <canvas id="equityChart" height="80"></canvas>
+</div>
+
+<!-- ── Daily P&L Bars ──────────────────────────────────────────────────── -->
+<div class="chart-section">
+  <div class="chart-header">
+    <div>
+      <div class="chart-title">Daily P&amp;L</div>
+      <div class="chart-legend">
+        <span class="legend-item">
+          <span class="legend-dot" style="background:rgba(34,197,94,.85)"></span>Profit day
+        </span>
+        <span class="legend-item">
+          <span class="legend-dot" style="background:rgba(239,68,68,.85)"></span>Loss day
+        </span>
+      </div>
+    </div>
+  </div>
+  <canvas id="dailyChart" height="52"></canvas>
 </div>
 
 <!-- ── Open Positions ─────────────────────────────────────────────────── -->
@@ -1047,26 +1145,31 @@ html, body {{
 <div class="spacer"></div>
 
 <script>
-const labels      = {json.dumps(chart_labels)};
-const equityCurve = {json.dumps(equity_curve)};
-const startValue  = {d['start_equity']};
-const milestones  = {json.dumps(milestones)};
+const isoLabels    = {json.dumps(chart_labels)};
+const labels       = {json.dumps(short_labels)};
+const equityCurve  = {json.dumps(equity_curve)};
+const peakCurve    = {json.dumps(peak_curve)};
+const dailyBars    = {json.dumps(daily_pnl_bars)};
+const startValue   = {d['start_equity']};
+const milestones   = {json.dumps({chart_labels.index(k) if k in chart_labels else -1: v for k, v in milestones.items()})};
+const todayIdx     = {today_idx};
 
-// Plugin: gold dashed vertical lines at milestone dates
+// Plugin: gold dashed vertical lines + labels at milestone x-indices
 const milestonePlugin = {{
   id: "milestones",
   afterDraw(chart) {{
     const ctx   = chart.ctx;
     const xAxis = chart.scales.x;
     const yAxis = chart.scales.y;
-    chart.data.labels.forEach((lbl, i) => {{
-      if (!milestones[lbl]) return;
-      const x = xAxis.getPixelForIndex(i);
+    Object.entries(milestones).forEach(([i, lbl]) => {{
+      const idx = +i;
+      if (idx < 0) return;
+      const x = xAxis.getPixelForValue(idx);
       ctx.save();
       ctx.strokeStyle = "#f59e0b";
-      ctx.lineWidth   = 1.5;
+      ctx.lineWidth   = 1.2;
       ctx.setLineDash([4, 3]);
-      ctx.globalAlpha = 0.55;
+      ctx.globalAlpha = 0.45;
       ctx.beginPath();
       ctx.moveTo(x, yAxis.top);
       ctx.lineTo(x, yAxis.bottom);
@@ -1076,55 +1179,87 @@ const milestonePlugin = {{
       ctx.fillStyle   = "#f59e0b";
       ctx.font        = "700 9px 'Fira Code', monospace";
       ctx.textAlign   = "center";
-      ctx.fillText(milestones[lbl], x, yAxis.top - 8);
+      ctx.fillText(lbl, x, yAxis.top - 6);
       ctx.restore();
     }});
   }}
 }};
 
-const chartCtx = document.getElementById("pnlChart").getContext("2d");
-new Chart(chartCtx, {{
-  plugins: [milestonePlugin],
+// Plugin: pulsing "today" marker on the equity chart
+const todayMarkerPlugin = {{
+  id: "todayMarker",
+  afterDatasetsDraw(chart) {{
+    if (todayIdx < 0) return;
+    const ds = chart.data.datasets[0];
+    const val = ds.data[todayIdx];
+    if (val === null || val === undefined) return;
+    const meta = chart.getDatasetMeta(0);
+    const pt   = meta.data[todayIdx];
+    if (!pt) return;
+    const ctx = chart.ctx;
+    ctx.save();
+    ctx.shadowColor = "#3b82f6";
+    ctx.shadowBlur  = 10;
+    ctx.fillStyle   = "#3b82f6";
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, 4.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur  = 0;
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth   = 2;
+    ctx.stroke();
+    ctx.restore();
+  }}
+}};
+
+// Gradient fill factory — respects whether the last point is above/below the starting line
+function equityGradient(ctx) {{
+  const chart = ctx.chart;
+  const area  = chart.chartArea;
+  if (!area) return "rgba(59,130,246,0.08)";
+  const g = chart.ctx.createLinearGradient(0, area.top, 0, area.bottom);
+  g.addColorStop(0, "rgba(59,130,246,0.22)");
+  g.addColorStop(1, "rgba(59,130,246,0.01)");
+  return g;
+}}
+
+new Chart(document.getElementById("equityChart").getContext("2d"), {{
+  plugins: [milestonePlugin, todayMarkerPlugin],
   data: {{
-    labels: labels,
+    labels,
     datasets: [
       {{
         type: "line",
-        label: "Portfolio Value ($)",
+        label: "Peak",
+        data: peakCurve,
+        borderColor: "rgba(34,197,94,0.55)",
+        borderWidth: 1.2,
+        borderDash: [4, 4],
+        pointRadius: 0,
+        pointHoverRadius: 0,
+        fill: false,
+        tension: 0,
+        spanGaps: false,
+        order: 2,
+      }},
+      {{
+        type: "line",
+        label: "Equity",
         data: equityCurve,
         borderColor: "#3b82f6",
-        backgroundColor: (ctx) => {{
-          const chart = ctx.chart;
-          const {{ctx: c, chartArea}} = chart;
-          if (!chartArea) return "rgba(59,130,246,0.08)";
-          const gradient = c.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
-          gradient.addColorStop(0,   "rgba(59,130,246,0.18)");
-          gradient.addColorStop(1,   "rgba(59,130,246,0.01)");
-          return gradient;
-        }},
+        backgroundColor: equityGradient,
         fill: true,
-        tension: 0.3,
-        pointRadius: 0,
+        tension: 0.28,
+        pointRadius: ctx => ctx.dataIndex === todayIdx ? 0 : 0,
         pointHoverRadius: 5,
         pointHoverBackgroundColor: "#3b82f6",
         pointHoverBorderColor: "#fff",
         pointHoverBorderWidth: 2,
         borderWidth: 2.5,
         spanGaps: false,
-        segment: {{
-          borderColor: ctx => {{
-            const v = ctx.p1.parsed.y;
-            if (v === null) return "#3b82f6";
-            return v >= startValue ? "#22c55e" : "#ef4444";
-          }},
-          backgroundColor: ctx => {{
-            const v = ctx.p1.parsed.y;
-            if (v === null) return "rgba(59,130,246,0.05)";
-            return v >= startValue ? "rgba(34,197,94,0.06)" : "rgba(239,68,68,0.06)";
-          }}
-        }}
-      }}
-    ]
+        order: 1,
+      }},
+    ],
   }},
   options: {{
     responsive: true,
@@ -1133,6 +1268,7 @@ new Chart(chartCtx, {{
     plugins: {{
       legend: {{ display: false }},
       tooltip: {{
+        filter: i => i.datasetIndex === 1,  // hide peak dataset from tooltip
         backgroundColor: "#0c1526",
         borderColor: "#1a2d42",
         borderWidth: 1,
@@ -1142,32 +1278,116 @@ new Chart(chartCtx, {{
         bodyFont: {{ family: "'Fira Code', monospace", size: 11 }},
         padding: 12,
         callbacks: {{
-          title: t => t[0].label + (milestones[t[0].label] ? "  · " + milestones[t[0].label] : ""),
+          title: t => {{
+            const iso = isoLabels[t[0].dataIndex];
+            const ms  = milestones[t[0].dataIndex];
+            return iso + (ms ? "  ·  " + ms : "");
+          }},
           label: c => {{
             if (c.parsed.y === null) return null;
             const pnl  = c.parsed.y - startValue;
-            const sign = pnl >= 0 ? "+" : "";
-            return ` ${{c.parsed.y.toLocaleString("en-US", {{minimumFractionDigits:2, maximumFractionDigits:2}})}}  (P&L: ${{sign}}${{Math.abs(pnl).toFixed(2)}})`;
+            const sign = pnl >= 0 ? "+" : "−";
+            return ` $${{c.parsed.y.toLocaleString("en-US", {{minimumFractionDigits:2, maximumFractionDigits:2}})}}  (${{sign}}$${{Math.abs(pnl).toFixed(2)}})`;
           }}
         }}
       }}
     }},
     scales: {{
       x: {{
-        grid: {{ color: "rgba(26,45,66,.5)", drawTicks: false }},
+        grid: {{ color: "rgba(26,45,66,.35)", drawTicks: false }},
         ticks: {{
           color: "#475569",
           font: {{ size: 9, family: "'Fira Code', monospace" }},
-          maxRotation: 45
+          maxRotation: 0,
+          autoSkip: true,
+          autoSkipPadding: 20,
         }}
       }},
       y: {{
         position: "left",
-        grid: {{ color: "rgba(26,45,66,.5)" }},
+        grid: {{
+          color: ctx => ctx.tick.value === startValue ? "rgba(100,116,139,.6)" : "rgba(26,45,66,.5)",
+          lineWidth: ctx => ctx.tick.value === startValue ? 1 : 1,
+          borderDash: ctx => ctx.tick.value === startValue ? [4, 4] : [],
+        }},
+        ticks: {{
+          color: ctx => ctx.tick.value === startValue ? "#94a3b8" : "#475569",
+          font: {{ size: 9, family: "'Fira Code', monospace" }},
+          callback: v => "$" + v.toLocaleString("en-US", {{minimumFractionDigits:0, maximumFractionDigits:0}})
+        }}
+      }}
+    }}
+  }}
+}});
+
+// Daily P&L bar chart — aligned to the same x-axis
+new Chart(document.getElementById("dailyChart").getContext("2d"), {{
+  plugins: [milestonePlugin],
+  data: {{
+    labels,
+    datasets: [{{
+      type: "bar",
+      label: "Daily P&L",
+      data: dailyBars,
+      backgroundColor: dailyBars.map(v =>
+        v === null ? "rgba(71,85,105,0.15)"
+        : v >= 0    ? "rgba(34,197,94,0.75)"
+        :             "rgba(239,68,68,0.75)"
+      ),
+      borderColor: dailyBars.map(v =>
+        v === null ? "rgba(71,85,105,0.3)"
+        : v >= 0    ? "#22c55e"
+        :             "#ef4444"
+      ),
+      borderWidth: 1,
+      borderRadius: 2,
+      barPercentage: 0.75,
+      categoryPercentage: 0.85,
+    }}]
+  }},
+  options: {{
+    responsive: true,
+    layout: {{ padding: {{ top: 24, right: 8 }} }},
+    plugins: {{
+      legend: {{ display: false }},
+      tooltip: {{
+        backgroundColor: "#0c1526",
+        borderColor: "#1a2d42",
+        borderWidth: 1,
+        titleColor: "#94a3b8",
+        bodyColor: "#e2e8f0",
+        bodyFont: {{ family: "'Fira Code', monospace", size: 11 }},
+        titleFont: {{ family: "'Fira Code', monospace", size: 10 }},
+        padding: 12,
+        callbacks: {{
+          title: t => isoLabels[t[0].dataIndex],
+          label: c => {{
+            if (c.parsed.y === null) return " —";
+            const s = c.parsed.y >= 0 ? "+" : "−";
+            return ` ${{s}}$${{Math.abs(c.parsed.y).toFixed(2)}}`;
+          }}
+        }}
+      }}
+    }},
+    scales: {{
+      x: {{
+        grid: {{ display: false }},
         ticks: {{
           color: "#475569",
           font: {{ size: 9, family: "'Fira Code', monospace" }},
-          callback: v => "$" + v.toLocaleString("en-US", {{minimumFractionDigits:0, maximumFractionDigits:0}})
+          maxRotation: 0,
+          autoSkip: true,
+          autoSkipPadding: 20,
+        }}
+      }},
+      y: {{
+        grid: {{
+          color: ctx => ctx.tick.value === 0 ? "rgba(100,116,139,.5)" : "rgba(26,45,66,.4)",
+        }},
+        ticks: {{
+          color: "#475569",
+          font: {{ size: 9, family: "'Fira Code', monospace" }},
+          callback: v => (v >= 0 ? "+$" : "−$") + Math.abs(v).toLocaleString("en-US", {{maximumFractionDigits:0}}),
         }}
       }}
     }}
