@@ -77,10 +77,31 @@ MAX_TRADES_PER_DAY = 5       # up from 3 — more opportunities
 MIN_RR             = 2.0     # require 2:1 reward-to-risk (higher bar, bigger winners)
 TRAILING_ACTIVATE  = 0.03    # arm trail earlier (3%) — protects smaller winners
 TRAILING_DISTANCE  = 0.03    # trail 3% below high (was 5% — tighter protection)
-PEAK_DRAWDOWN_FRAC = 0.3     # flatten everything if account gives back >30% of peak gains
-PEAK_DRAWDOWN_MIN  = 300.0   # only enforce once peak gain exceeds this (avoid noise)
 SPY_CRASH_PCT      = -0.015  # if SPY day-change <= -1.5%, treat as broad-market sell-off
 BE_LOCK_GAIN       = 0.03    # once a position is up 3%, raise hard stop to break-even
+
+# Profit ratchet — as peak gain grows, allow less giveback. The bot becomes
+# more defensive about money already earned. Tiers (peak gain → max giveback):
+#   <  $300  : not enforced (noise)
+#   >= $300  : 30% giveback
+#   >= $500  : 15% giveback
+#   >= $800  : 8%  giveback   ← user's "rather sell and be safe" line
+#   >= $1000 : 5%  giveback
+# Above $800 the bot also stops opening new positions ("bank-protection mode").
+PROFIT_TIERS = [
+    (1000, 0.95),
+    ( 800, 0.92),
+    ( 500, 0.85),
+    ( 300, 0.70),
+]
+BANK_PROTECT_GAIN = 800.0    # at this peak, skip new entries — defend only
+
+def peak_drawdown_floor(peak_gain: float) -> float:
+    """Returns the equity floor (gain $) below which we flatten everything."""
+    for threshold, frac in PROFIT_TIERS:
+        if peak_gain >= threshold:
+            return peak_gain * frac
+    return -1e9  # below any tier, no floor enforced
 
 # Scan universe — high-momentum names + leveraged ETFs for competition edge
 WATCH_UNIVERSE = [
@@ -612,33 +633,36 @@ def run():
             write_heartbeat("market_crash_flatten", f"SPY {spy_chg*100:+.2f}%")
             return
 
-    # ── STEP A0: Account-level drawdown stop ───────────────────────────────
-    # If we gave back > PEAK_DRAWDOWN_FRAC of peak gains, flatten everything.
+    # ── STEP A0: Profit ratchet — defend earned gains harder as they grow ──
     perf = load_performance()
     peak_equity = max(perf.get("peak_equity", equity), equity)
     perf["peak_equity"] = peak_equity
     acct_start = perf.get("account_start_equity") or equity
     peak_gain  = peak_equity - acct_start
     cur_gain   = equity - acct_start
-    if peak_gain >= PEAK_DRAWDOWN_MIN and cur_gain < peak_gain * (1 - PEAK_DRAWDOWN_FRAC):
-        log.warning(f"  ACCOUNT DRAWDOWN — peak gain ${peak_gain:.2f}, current ${cur_gain:.2f}. Flattening.")
+    floor      = peak_drawdown_floor(peak_gain)
+    if peak_gain >= 300 and cur_gain < floor:
+        log.warning(f"  PROFIT RATCHET — peak ${peak_gain:.0f}, floor ${floor:.0f}, "
+                    f"current ${cur_gain:.0f}. Flattening.")
         for sym, pos in positions.items():
             qty = abs(int(float(pos["qty"])))
             if qty > 0 and sym not in pending_syms:
                 place_order(sym, qty, "sell")
-                log_trade({"action": "ACCOUNT_DRAWDOWN_FLATTEN", "symbol": sym,
+                log_trade({"action": "PROFIT_RATCHET_FLATTEN", "symbol": sym,
                            "qty": qty, "price": float(pos["current_price"]),
                            "peak_gain": round(peak_gain, 2),
-                           "cur_gain":  round(cur_gain, 2)})
+                           "cur_gain":  round(cur_gain, 2),
+                           "floor":     round(floor, 2)})
         for trigger in strategy["triggers"]:
             if trigger.get("status") in ("in_trade", "active"):
                 trigger["status"] = "closed"
         save_performance(perf)
         save_strategy(strategy)
-        write_heartbeat("drawdown_flatten",
+        write_heartbeat("ratchet_flatten",
                         f"peak +${peak_gain:.0f} → +${cur_gain:.0f}")
         return
     save_performance(perf)
+    bank_protect = peak_gain >= BANK_PROTECT_GAIN
 
     # ── STEP A: Manage open positions ──────────────────────────────────────
     # Re-attach orphan Alpaca positions: any symbol Alpaca shows us holding that
@@ -738,9 +762,14 @@ def run():
         regime = regime_check()
         log.info(f"  Regime: {regime['regime']} | Posture: {regime['posture']}")
 
+        # Bank-protection: once we've earned $800+ at peak, stop taking new
+        # risk. Just defend the gains — do not risk them on fresh trades.
+        if bank_protect:
+            log.warning(f"  BANK-PROTECTION mode (peak gain >=${BANK_PROTECT_GAIN:.0f}) — "
+                        "no new entries, defending existing gains only.")
         # Regime gate: in a trending-down market, do not open new long positions.
         # Existing positions are still managed by manage_exits above.
-        if regime["regime"] == "trending_down":
+        elif regime["regime"] == "trending_down":
             log.warning("  Regime trending_down — skipping all new entries this run.")
         else:
             # Open-risk cap: sum of (entry - stop) × qty across active positions.
