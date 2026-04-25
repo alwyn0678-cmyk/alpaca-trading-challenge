@@ -689,68 +689,94 @@ def run():
         regime = regime_check()
         log.info(f"  Regime: {regime['regime']} | Posture: {regime['posture']}")
 
-        for trigger in strategy["triggers"]:
-            if trigger["status"] != "active":
-                continue
-            if trades_today >= MAX_TRADES_PER_DAY:
-                break
+        # Regime gate: in a trending-down market, do not open new long positions.
+        # Existing positions are still managed by manage_exits above.
+        if regime["regime"] == "trending_down":
+            log.warning("  Regime trending_down — skipping all new entries this run.")
+        else:
+            # Open-risk cap: sum of (entry - stop) × qty across active positions.
+            # MAX_OPEN_RISK_PCT was defined but never enforced — fixing that now.
+            max_open_risk = CHALLENGE_CAPITAL * MAX_OPEN_RISK_PCT
+            current_open_risk = 0.0
+            for t in strategy["triggers"]:
+                if t.get("status") == "in_trade":
+                    ent = t.get("actual_entry") or t.get("entry_price", 0)
+                    stp = t.get("stop", 0)
+                    q   = t.get("qty", 0)
+                    current_open_risk += abs(ent - stp) * q
+            log.info(f"  Open risk: ${current_open_risk:.2f} / ${max_open_risk:.2f} cap")
 
-            sym = trigger["symbol"]
-            if sym in REGIME_ONLY:
-                continue   # never trade the regime-check ETFs
-            if sym in positions or sym in pending_syms:
-                continue
+            for trigger in strategy["triggers"]:
+                if trigger["status"] != "active":
+                    continue
+                if trades_today >= MAX_TRADES_PER_DAY:
+                    break
 
-            price = get_latest_price(sym)
-            if not price:
-                log.warning(f"  {sym}: could not fetch price. Skipping.")
-                continue
-
-            tech = get_tech(sym)
-            enter, reason = should_enter(trigger, price, tech)
-
-            if enter:
-                # For pullback entries use a limit order at the planned MA entry level.
-                # For breakout entries use a market order (momentum — don't miss the move).
-                entry_type = trigger.get("entry_type", "breakout")
-                planned_entry = trigger.get("entry_price", price)
-                order_type  = "limit"    if entry_type == "pullback" else "market"
-                limit_price = planned_entry if entry_type == "pullback" else None
-
-                # Size from planned entry price for pullbacks (that's the actual risk basis)
-                sizing_price = planned_entry if entry_type == "pullback" else price
-                qty = size_position(CHALLENGE_CAPITAL, sizing_price, trigger["stop"])
-                cost = qty * (limit_price or price)
-                if cost > challenge_bp * 0.90:
-                    qty = max(int(challenge_bp * 0.90 / (limit_price or price)), 0)
-                if qty <= 0:
-                    log.warning(f"  {sym}: size=0 — skipping.")
+                sym = trigger["symbol"]
+                if sym in REGIME_ONLY:
+                    continue   # never trade the regime-check ETFs
+                if sym in positions or sym in pending_syms:
                     continue
 
-                # Log R:R from planned entry (consistent with how should_enter evaluated it)
-                rr = calc_rr(planned_entry, trigger["stop"], trigger["target_1"])
-                order_desc = f"LIMIT@{limit_price:.2f}" if order_type == "limit" else f"MARKET@{price:.2f}"
-                log.info(f"  {sym}: ENTERING | {order_desc} | qty={qty} | "
-                         f"stop=${trigger['stop']:.2f} | T1=${trigger['target_1']:.2f} | R:R={rr:.2f}")
+                price = get_latest_price(sym)
+                if not price:
+                    log.warning(f"  {sym}: could not fetch price. Skipping.")
+                    continue
 
-                order = place_order(sym, qty, "buy", order_type=order_type, limit_price=limit_price)
-                if order.get("id"):
-                    trigger["status"]       = "in_trade"
-                    trigger["actual_entry"] = price
-                    trigger["qty"]          = qty
-                    strategy.setdefault("trades_today", {})[today] = trades_today + 1
-                    trades_today += 1
-                    log_trade({
-                        "action": "ENTRY", "symbol": sym, "qty": qty,
-                        "price": price, "stop": trigger["stop"],
-                        "target_1": trigger["target_1"], "target_2": trigger["target_2"],
-                        "setup_type": trigger["setup_type"], "rr": round(rr, 2),
-                        "order_id": order.get("id"), "regime": regime["regime"],
-                    })
+                tech = get_tech(sym)
+                enter, reason = should_enter(trigger, price, tech)
+
+                if enter:
+                    # For pullback entries use a limit order at the planned MA entry level.
+                    # For breakout entries use a market order (momentum — don't miss the move).
+                    entry_type = trigger.get("entry_type", "breakout")
+                    planned_entry = trigger.get("entry_price", price)
+                    order_type  = "limit"    if entry_type == "pullback" else "market"
+                    limit_price = planned_entry if entry_type == "pullback" else None
+
+                    # Size from planned entry price for pullbacks (that's the actual risk basis)
+                    sizing_price = planned_entry if entry_type == "pullback" else price
+                    qty = size_position(CHALLENGE_CAPITAL, sizing_price, trigger["stop"])
+                    cost = qty * (limit_price or price)
+                    if cost > challenge_bp * 0.90:
+                        qty = max(int(challenge_bp * 0.90 / (limit_price or price)), 0)
+                    if qty <= 0:
+                        log.warning(f"  {sym}: size=0 — skipping.")
+                        continue
+
+                    # Open-risk cap: reject if this trade would push concurrent risk
+                    # above MAX_OPEN_RISK_PCT of challenge capital.
+                    new_trade_risk = abs(sizing_price - trigger["stop"]) * qty
+                    if current_open_risk + new_trade_risk > max_open_risk:
+                        log.info(f"  {sym}: skip — open risk ${current_open_risk:.2f} + new "
+                                 f"${new_trade_risk:.2f} > cap ${max_open_risk:.2f}")
+                        continue
+
+                    # Log R:R from planned entry (consistent with how should_enter evaluated it)
+                    rr = calc_rr(planned_entry, trigger["stop"], trigger["target_1"])
+                    order_desc = f"LIMIT@{limit_price:.2f}" if order_type == "limit" else f"MARKET@{price:.2f}"
+                    log.info(f"  {sym}: ENTERING | {order_desc} | qty={qty} | "
+                             f"stop=${trigger['stop']:.2f} | T1=${trigger['target_1']:.2f} | R:R={rr:.2f}")
+
+                    order = place_order(sym, qty, "buy", order_type=order_type, limit_price=limit_price)
+                    if order.get("id"):
+                        trigger["status"]       = "in_trade"
+                        trigger["actual_entry"] = price
+                        trigger["qty"]          = qty
+                        current_open_risk      += new_trade_risk
+                        strategy.setdefault("trades_today", {})[today] = trades_today + 1
+                        trades_today += 1
+                        log_trade({
+                            "action": "ENTRY", "symbol": sym, "qty": qty,
+                            "price": price, "stop": trigger["stop"],
+                            "target_1": trigger["target_1"], "target_2": trigger["target_2"],
+                            "setup_type": trigger["setup_type"], "rr": round(rr, 2),
+                            "order_id": order.get("id"), "regime": regime["regime"],
+                        })
+                    else:
+                        log.error(f"  {sym}: order failed — {order}")
                 else:
-                    log.error(f"  {sym}: order failed — {order}")
-            else:
-                log.info(f"  {sym}: no entry — {reason}")
+                    log.info(f"  {sym}: no entry — {reason}")
 
     # ── STEP C: Daily setup scan (once per day, after 10:30 AM ET) ─────────
     now_utc_hour = datetime.now(timezone.utc).hour
