@@ -79,6 +79,8 @@ TRAILING_ACTIVATE  = 0.03    # arm trail earlier (3%) — protects smaller winne
 TRAILING_DISTANCE  = 0.03    # trail 3% below high (was 5% — tighter protection)
 PEAK_DRAWDOWN_FRAC = 0.3     # flatten everything if account gives back >30% of peak gains
 PEAK_DRAWDOWN_MIN  = 300.0   # only enforce once peak gain exceeds this (avoid noise)
+SPY_CRASH_PCT      = -0.015  # if SPY day-change <= -1.5%, treat as broad-market sell-off
+BE_LOCK_GAIN       = 0.03    # once a position is up 3%, raise hard stop to break-even
 
 # Scan universe — high-momentum names + leveraged ETFs for competition edge
 WATCH_UNIVERSE = [
@@ -274,6 +276,23 @@ def size_position(account_value: float, entry: float, stop: float) -> int:
     stop_dist    = abs(entry - stop)
     return max(int(risk_dollars / stop_dist), 1) if stop_dist > 0 else 0
 
+# ── Intraday market-crash detector ────────────────────────────────────────
+def spy_day_change() -> Optional[float]:
+    """
+    Returns SPY's intraday change as a decimal (e.g. -0.018 = -1.8%) or None
+    if the data isn't available. Uses the snapshot endpoint so we get a live
+    latestTrade vs prevDailyBar close — works mid-session, unlike daily bars.
+    """
+    snap = _get("/stocks/snapshots?symbols=SPY&feed=iex", base=DATA_URL)
+    if not isinstance(snap, dict):
+        return None
+    s = snap.get("SPY") or {}
+    last  = (s.get("latestTrade") or {}).get("p")
+    prev  = (s.get("prevDailyBar") or {}).get("c")
+    if not last or not prev:
+        return None
+    return (last - prev) / prev
+
 # ── Regime check ───────────────────────────────────────────────────────────
 def regime_check() -> dict:
     spy = get_tech("SPY")
@@ -359,6 +378,13 @@ def check_exits(trigger: dict, price: float) -> tuple[Optional[str], str]:
 def update_trailing(trigger: dict, price: float):
     entry = trigger.get("actual_entry") or trigger.get("entry_price", price)
     gain  = (price - entry) / entry if entry else 0
+    # Break-even lock: once we're up BE_LOCK_GAIN, raise the hard stop to entry
+    # so the position can never round-trip back into a loss.
+    if gain >= BE_LOCK_GAIN and not trigger.get("be_locked"):
+        if entry > trigger.get("stop", 0):
+            log.info(f"  Break-even lock — stop raised from ${trigger.get('stop', 0):.2f} to ${entry:.2f}")
+            trigger["stop"] = round(entry, 2)
+            trigger["be_locked"] = True
     if gain >= TRAILING_ACTIVATE:
         trigger["trailing_active"] = True
     if trigger.get("trailing_active"):
@@ -562,6 +588,29 @@ def run():
 
     log.info(f"  Open positions: {list(positions.keys()) or 'none'}")
     log.info(f"  Trades today: {trades_today}/{MAX_TRADES_PER_DAY}")
+
+    # ── STEP A-: Broad-market crash detector ───────────────────────────────
+    # If SPY is down hard intraday, the broad market is selling off — flatten
+    # all longs and skip new entries this run.
+    spy_chg = spy_day_change()
+    if spy_chg is not None:
+        log.info(f"  SPY day change: {spy_chg*100:+.2f}%")
+        if spy_chg <= SPY_CRASH_PCT:
+            log.warning(f"  MARKET CRASH SIGNAL — SPY {spy_chg*100:+.2f}% (≤ {SPY_CRASH_PCT*100:.1f}%). Flattening.")
+            pending_now = get_open_order_symbols()
+            for sym, pos in positions.items():
+                qty = abs(int(float(pos["qty"])))
+                if qty > 0 and sym not in pending_now:
+                    place_order(sym, qty, "sell")
+                    log_trade({"action": "MARKET_CRASH_FLATTEN", "symbol": sym, "qty": qty,
+                               "price": float(pos["current_price"]),
+                               "spy_change": round(spy_chg, 4)})
+            for trigger in strategy["triggers"]:
+                if trigger.get("status") in ("in_trade", "active"):
+                    trigger["status"] = "closed"
+            save_strategy(strategy)
+            write_heartbeat("market_crash_flatten", f"SPY {spy_chg*100:+.2f}%")
+            return
 
     # ── STEP A0: Account-level drawdown stop ───────────────────────────────
     # If we gave back > PEAK_DRAWDOWN_FRAC of peak gains, flatten everything.
