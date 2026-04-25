@@ -75,7 +75,7 @@ MAX_DAILY_LOSS_PCT = 0.04    # 4% per day ($400 on $10k)
 MAX_OPEN_RISK_PCT  = 0.04    # 4% total open across all positions
 MAX_TRADES_PER_DAY = 5       # up from 3 — more opportunities
 MIN_RR             = 2.0     # require 2:1 reward-to-risk (higher bar, bigger winners)
-TRAILING_ACTIVATE  = 0.05    # lock in gains earlier — activate trail at +5%
+TRAILING_ACTIVATE  = 0.03    # arm trail earlier (3%) — protects smaller winners
 TRAILING_DISTANCE  = 0.03    # trail 3% below high (was 5% — tighter protection)
 PEAK_DRAWDOWN_FRAC = 0.3     # flatten everything if account gives back >30% of peak gains
 PEAK_DRAWDOWN_MIN  = 300.0   # only enforce once peak gain exceeds this (avoid noise)
@@ -532,10 +532,25 @@ def run():
     log.info(f"  Equity: ${equity:,.2f} | Cash: ${cash:,.2f} | Day PnL: ${daily_pnl:+.2f}")
     log.info(f"  Challenge capital: ${CHALLENGE_CAPITAL:,.2f} | Available: ${challenge_bp:,.2f}")
 
-    # 3. Daily loss limit (Skill.md hard rule)
+    # 3. Daily loss limit — flatten everything AND block new trades
     if daily_pnl < -max_daily_loss:
-        log.warning(f"DAILY LOSS LIMIT HIT (${daily_pnl:.2f}). No new trades today.")
+        log.warning(f"DAILY LOSS LIMIT HIT (${daily_pnl:.2f}). Flattening all positions.")
+        live_positions = get_positions()
+        pending_now    = get_open_order_symbols()
+        for sym, pos in live_positions.items():
+            qty = abs(int(float(pos["qty"])))
+            if qty > 0 and sym not in pending_now:
+                place_order(sym, qty, "sell")
+                log_trade({"action": "DAILY_LOSS_FLATTEN", "symbol": sym, "qty": qty,
+                           "price": float(pos["current_price"]),
+                           "daily_pnl": round(daily_pnl, 2)})
+        strategy = load_strategy()
+        for trigger in strategy["triggers"]:
+            if trigger.get("status") in ("in_trade", "active"):
+                trigger["status"] = "closed"
+        save_strategy(strategy)
         _save_perf_snapshot(equity, daily_pnl)
+        write_heartbeat("daily_loss_flatten", f"day P&L=${daily_pnl:+.2f}")
         return
 
     # 4. State
