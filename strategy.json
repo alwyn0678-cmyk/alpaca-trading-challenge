@@ -5,7 +5,8 @@
   "trades_today": {
     "2026-04-14": 1,
     "2026-04-20": 1,
-    "2026-04-24": 1
+    "2026-04-24": 1,
+    "2026-04-27": 1
   },
   "triggers": [
     {
@@ -106,7 +107,7 @@
     {
       "symbol": "XLF",
       "setup_type": "pullback_20ma",
-      "status": "active",
+      "status": "in_trade",
       "entry_type": "pullback",
       "pullback_low": 50.39,
       "pullback_high": 52.17,
@@ -120,8 +121,10 @@
       "highest_price": null,
       "source": "auto_scan",
       "detected_at": "2026-04-27T15:52:13.572173+00:00",
-      "notes": "Pullback to 20-MA in uptrend, dist=1.08%"
+      "notes": "Pullback to 20-MA in uptrend, dist=1.08%",
+      "actual_entry": 51.775,
+      "qty": 176
     }
   ],
-  "last_run": "2026-04-27T15:52:15.831383+00:00"
+  "last_run": "2026-04-27T17:27:14.024892+00:00"
 }
