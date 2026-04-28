@@ -1,7 +1,7 @@
 {
   "challenge_start": "2026-04-13",
   "challenge_end": "2026-05-13",
-  "last_scan_date": "2026-04-27",
+  "last_scan_date": "2026-04-28",
   "trades_today": {
     "2026-04-14": 1,
     "2026-04-20": 1,
@@ -124,7 +124,45 @@
       "notes": "Pullback to 20-MA in uptrend, dist=1.08%",
       "actual_entry": 51.775,
       "qty": 176
+    },
+    {
+      "symbol": "AAPL",
+      "setup_type": "pullback_20ma",
+      "status": "active",
+      "entry_type": "pullback",
+      "pullback_low": 259.69,
+      "pullback_high": 268.87,
+      "entry_price": 262.31,
+      "stop": 257.13,
+      "target_1": 280.93,
+      "target_2": 294.31,
+      "t1_hit": false,
+      "trailing_active": false,
+      "trailing_stop": null,
+      "highest_price": null,
+      "source": "auto_scan",
+      "detected_at": "2026-04-28T16:10:19.702109+00:00",
+      "notes": "Pullback to 20-MA in uptrend, dist=2.00%"
+    },
+    {
+      "symbol": "XLF",
+      "setup_type": "pullback_20ma",
+      "status": "active",
+      "entry_type": "pullback",
+      "pullback_low": 50.58,
+      "pullback_high": 52.37,
+      "entry_price": 51.1,
+      "stop": 50.09,
+      "target_1": 54.39,
+      "target_2": 56.98,
+      "t1_hit": false,
+      "trailing_active": false,
+      "trailing_stop": null,
+      "highest_price": null,
+      "source": "auto_scan",
+      "detected_at": "2026-04-28T16:10:22.977522+00:00",
+      "notes": "Pullback to 20-MA in uptrend, dist=1.38%"
     }
   ],
-  "last_run": "2026-04-27T18:51:52.506384+00:00"
+  "last_run": "2026-04-28T16:10:29.386523+00:00"
 }
