@@ -2,15 +2,23 @@ name: Alpaca Trading Bot
 
 on:
   schedule:
-    # GitHub Actions free-tier silently drops :00 schedules under load.
-    # Using off-hour minutes (7,22,37,52) is meaningfully more reliable, and
-    # multiple cron entries give GitHub more chances to actually fire one.
+    # GitHub Actions free-tier silently drops cron fires under load — we've
+    # observed full days of zero scheduled runs. The schedules below remain
+    # as a best-effort backup, but the reliable path is repository_dispatch
+    # triggered by an external cron service (cron-job.org, EasyCron, etc.)
     # 14:00–20:00 UTC = 10am–4pm ET (DST); bot exits immediately if market closed.
     - cron: "7,22,37,52 14,15,16,17,18,19,20 * * 1-5"
     - cron: "12,42 13,14,15,16,17,18,19,20 * * 1-5"
+    - cron: "17,47 14,15,16,17,18,19,20 * * 1-5"
 
-  # Allow manual trigger from the GitHub Actions tab
+  # Manual trigger from GitHub Actions tab or `gh workflow run`
   workflow_dispatch:
+
+  # External cron trigger via GitHub API — POST to:
+  #   /repos/<owner>/<repo>/dispatches  with body: {"event_type":"run-bot"}
+  # Set up at cron-job.org with a GitHub PAT (workflow scope) for reliability.
+  repository_dispatch:
+    types: [run-bot]
 
 jobs:
   run-bot:
