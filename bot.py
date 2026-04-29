@@ -68,13 +68,14 @@ HEADERS = {
 # All sizing, loss limits, and buying-power checks use this cap.
 CHALLENGE_CAPITAL  = 10_000.0
 
-# ── Risk constants — COMPETITION MODE ─────────────────────────────────────
-# Sized for a 30-day challenge: bigger positions = bigger wins.
-MAX_RISK_PCT       = 0.02    # 2% per trade ($200 on $10k)
-MAX_DAILY_LOSS_PCT = 0.04    # 4% per day ($400 on $10k)
-MAX_OPEN_RISK_PCT  = 0.04    # 4% total open across all positions
-MAX_TRADES_PER_DAY = 5       # up from 3 — more opportunities
-MIN_RR             = 2.0     # require 2:1 reward-to-risk (higher bar, bigger winners)
+# ── Risk constants — AGGRESSIVE COMPETITION MODE ──────────────────────────
+# 14 days remain — need to push the offense to actually win this.
+# Defenses (daily-loss flatten, profit ratchet, crash detector) stay intact.
+MAX_RISK_PCT       = 0.03    # 3% per trade ($300 on $10k) — was 2%
+MAX_DAILY_LOSS_PCT = 0.04    # unchanged — daily flatten still kicks at -4%
+MAX_OPEN_RISK_PCT  = 0.06    # 6% concurrent exposure — was 4%
+MAX_TRADES_PER_DAY = 6       # was 5
+MIN_RR             = 1.5     # was 2.0 — accept more setups, take more shots
 TRAILING_ACTIVATE  = 0.03    # arm trail earlier (3%) — protects smaller winners
 TRAILING_DISTANCE  = 0.03    # trail 3% below high (was 5% — tighter protection)
 SPY_CRASH_PCT      = -0.015  # if SPY day-change <= -1.5%, treat as broad-market sell-off
@@ -107,6 +108,8 @@ def peak_drawdown_floor(peak_gain: float) -> float:
 WATCH_UNIVERSE = [
     # Megacap momentum (high beta, liquid, trend well)
     "NVDA", "AMD", "META", "MSFT", "AAPL", "TSLA", "AMZN", "GOOGL",
+    # Added: more megacap/large-cap momentum (aggressive mode)
+    "AVGO", "NFLX", "ARM", "UBER",
     # Sector ETFs with catalyst exposure
     "XLF", "XLE", "XLK",
     # Leveraged ETFs — 3x amplification; huge upside in trending markets
@@ -452,9 +455,9 @@ def scan_new_setups(strategy: dict) -> list:
         skip_reason = None
 
         # Rule 1: Momentum breakout — new 20-day high on strong volume in uptrend
-        # Relaxed: rel_vol 1.5→1.2 to catch more setups in recovering markets
+        # Aggressive mode: rel_vol gate dropped to 1.0× to catch more setups
         if (high_20d and close >= high_20d * 0.998
-                and rel_vol >= 1.2 and close > m50 and prev and close > prev):
+                and rel_vol >= 1.0 and close > m50 and prev and close > prev):
             stop  = round(max(m20, close * 0.94), 2)   # below 20-MA or -6% floor
             t1    = round(close * 1.06, 2)              # +6% target
             t2    = round(close * 1.12, 2)              # +12% target
@@ -473,14 +476,14 @@ def scan_new_setups(strategy: dict) -> list:
                 }
             else:
                 skip_reason = f"momentum_breakout R:R {rr:.2f} < {MIN_RR} (entry={entry} stop={stop} T1={t1})"
-        elif high_20d and close >= high_20d * 0.998 and rel_vol < 1.2:
-            skip_reason = f"near 20d-high but rel_vol {rel_vol:.2f}x < 1.2x"
+        elif high_20d and close >= high_20d * 0.998 and rel_vol < 1.0:
+            skip_reason = f"near 20d-high but rel_vol {rel_vol:.2f}x < 1.0x"
         elif high_20d and close >= high_20d * 0.998 and close <= m50:
             skip_reason = f"near 20d-high but price {close:.2f} below MA50 {m50:.2f}"
 
         # Rule 2: Fresh 50-MA breakout on volume (trend change signal)
         if not setup and close > m50 and prev and prev < m50:
-            if rel_vol >= 1.2:
+            if rel_vol >= 1.0:
                 entry  = round(close * 1.002, 2)
                 stop   = round(m50 * 0.985, 2)
                 t1     = round(close * 1.05, 2)
@@ -500,13 +503,13 @@ def scan_new_setups(strategy: dict) -> list:
                 else:
                     skip_reason = f"50ma_breakout R:R {rr:.2f} < {MIN_RR}"
             else:
-                skip_reason = f"50MA crossover but rel_vol {rel_vol:.2f}x < 1.2x"
+                skip_reason = f"50MA crossover but rel_vol {rel_vol:.2f}x < 1.0x"
 
         # Rule 3: Pullback to 20-MA within uptrend — buy the dip at support
-        # Relaxed: proximity window 1.5%→2.5% to catch more pullbacks
+        # Aggressive mode: window widened to 4% (catches shallower pullbacks)
         if not setup and close > m50 and m20 > m50:
             dist_to_m20 = abs(close - m20) / m20
-            if dist_to_m20 < 0.025:   # within 2.5% of 20-MA (was 1.5%)
+            if dist_to_m20 < 0.04:   # within 4% of 20-MA
                 entry = round(m20, 2)
                 stop  = round(m50 * 0.988, 2)
                 t1    = round(close * 1.05, 2)
@@ -529,7 +532,7 @@ def scan_new_setups(strategy: dict) -> list:
                 else:
                     skip_reason = f"pullback_20ma R:R {rr:.2f} < {MIN_RR}"
             elif close > m50 and m20 > m50:
-                skip_reason = f"uptrend but dist_to_ma20 {dist_to_m20:.2%} > 2.5%"
+                skip_reason = f"uptrend but dist_to_ma20 {dist_to_m20:.2%} > 4%"
         elif not setup and not skip_reason:
             if close <= m50:
                 skip_reason = f"price {close:.2f} below MA50 {m50:.2f} — no uptrend"
@@ -836,12 +839,16 @@ def run():
                 enter, reason = should_enter(trigger, price, tech)
 
                 if enter:
-                    # For pullback entries use a limit order at the planned MA entry level.
-                    # For breakout entries use a market order (momentum — don't miss the move).
+                    # AGGRESSIVE: pullback orders previously placed limits AT the
+                    # exact MA20 — three days of XLF limits expired unfilled
+                    # because price never quite reached MA20. Switch to a
+                    # marketable limit at current price + 0.5% buffer so the
+                    # order fills immediately when we're already inside the
+                    # pullback zone (price is by definition near MA20 here).
                     entry_type = trigger.get("entry_type", "breakout")
                     planned_entry = trigger.get("entry_price", price)
                     order_type  = "limit"    if entry_type == "pullback" else "market"
-                    limit_price = planned_entry if entry_type == "pullback" else None
+                    limit_price = round(price * 1.005, 2) if entry_type == "pullback" else None
 
                     # Size from planned entry price for pullbacks (that's the actual risk basis)
                     sizing_price = planned_entry if entry_type == "pullback" else price
