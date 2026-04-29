@@ -664,6 +664,37 @@ def run():
     save_performance(perf)
     bank_protect = peak_gain >= BANK_PROTECT_GAIN
 
+    # ── STEP A-pre: Reconcile pending entries against actual order status ─
+    # Limit orders may not fill — when they expire/cancel, revert the trigger
+    # to "active" so the setup can be retried. This is what was leaving stuck
+    # in_trade triggers with no actual position.
+    for trigger in strategy["triggers"]:
+        oid = trigger.get("order_id")
+        sym = trigger.get("symbol", "")
+        if not oid or trigger.get("status") != "in_trade":
+            continue
+        if sym in positions:
+            continue   # actually filled — leave alone
+        order = _get(f"/orders/{oid}")
+        if not isinstance(order, dict):
+            continue
+        ostatus = order.get("status", "")
+        if ostatus in ("expired", "canceled", "rejected"):
+            log.info(f"  {sym}: order {oid[:8]} {ostatus} — reverting trigger to active")
+            trigger["status"]   = "active"
+            trigger["order_id"] = None
+            trigger["actual_entry"] = None
+            trigger["qty"] = 0
+            log_trade({"action": "NON_FILL", "symbol": sym,
+                       "order_id": oid, "order_status": ostatus,
+                       "limit_price": order.get("limit_price")})
+        elif ostatus == "filled":
+            # Confirm in_trade with the actual fill price
+            fill_px = float(order.get("filled_avg_price") or trigger.get("actual_entry") or 0)
+            if fill_px and abs(fill_px - (trigger.get("actual_entry") or 0)) > 0.01:
+                trigger["actual_entry"] = fill_px
+        # else: "new", "accepted", "partially_filled" — leave alone, recheck next run
+
     # ── STEP A: Manage open positions ──────────────────────────────────────
     # Re-attach orphan Alpaca positions: any symbol Alpaca shows us holding that
     # has no matching in_trade trigger gets its trigger flipped back to in_trade
@@ -841,6 +872,7 @@ def run():
                         trigger["status"]       = "in_trade"
                         trigger["actual_entry"] = price
                         trigger["qty"]          = qty
+                        trigger["order_id"]     = order.get("id")
                         current_open_risk      += new_trade_risk
                         strategy.setdefault("trades_today", {})[today] = trades_today + 1
                         trades_today += 1
