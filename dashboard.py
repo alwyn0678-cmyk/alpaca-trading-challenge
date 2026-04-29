@@ -615,6 +615,39 @@ html, body {{
 }}
 .refresh-link:hover {{ color: var(--blue); }}
 
+.live-badge {{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 10px;
+  background: rgba(34,197,94,.10);
+  border: 1px solid rgba(34,197,94,.35);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: #22c55e;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}}
+.live-dot {{
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #22c55e;
+  box-shadow: 0 0 0 0 rgba(34,197,94,.7);
+  animation: live-pulse 1.6s infinite;
+}}
+@keyframes live-pulse {{
+  0%   {{ box-shadow: 0 0 0 0   rgba(34,197,94,.7); }}
+  70%  {{ box-shadow: 0 0 0 8px rgba(34,197,94,0); }}
+  100% {{ box-shadow: 0 0 0 0   rgba(34,197,94,0); }}
+}}
+.refresh-countdown {{
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  min-width: 26px;
+  text-align: right;
+}}
+
 /* ── Challenge Progress ──────────────────────────── */
 .challenge-bar {{
   padding: 18px 28px 0;
@@ -952,7 +985,7 @@ html, body {{
 /* ── Bottom spacer ───────────────────────────────── */
 .spacer {{ height: 48px; }}
 </style>
-<meta http-equiv="refresh" content="120">
+<meta http-equiv="refresh" content="15">
 </head>
 <body>
 
@@ -971,9 +1004,23 @@ html, body {{
   </div>
   <div class="header-right">
     {mkt_badge}
+    <span class="live-badge"><span class="live-dot"></span>LIVE</span>
+    <span class="refresh-countdown" id="refreshCountdown">15s</span>
     <a class="refresh-link" href="/">&#8635; Refresh</a>
   </div>
 </header>
+<script>
+  // Countdown alongside the meta-refresh tag (15s).
+  (function() {{
+    let s = 15;
+    const el = document.getElementById('refreshCountdown');
+    if (!el) return;
+    setInterval(() => {{
+      s = Math.max(0, s - 1);
+      el.textContent = s + 's';
+    }}, 1000);
+  }})();
+</script>
 
 {staleness_banner}
 

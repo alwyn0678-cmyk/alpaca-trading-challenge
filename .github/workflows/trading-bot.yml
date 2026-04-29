@@ -1,30 +1,43 @@
 name: Alpaca Trading Bot
 
+# Public repo = unlimited GitHub Actions minutes, so we run a single long-lived
+# job that loops the bot every ~25 min through market hours. Cron just needs
+# to fire ONCE per day to start the loop. Multiple cron entries below give
+# us many chances to catch the start-of-day fire.
+
 on:
   schedule:
-    # GitHub Actions free-tier silently drops cron fires under load — we've
-    # observed full days of zero scheduled runs. The schedules below remain
-    # as a best-effort backup, but the reliable path is repository_dispatch
-    # triggered by an external cron service (cron-job.org, EasyCron, etc.)
-    # 14:00–20:00 UTC = 10am–4pm ET (DST); bot exits immediately if market closed.
-    - cron: "7,22,37,52 14,15,16,17,18,19,20 * * 1-5"
-    - cron: "12,42 13,14,15,16,17,18,19,20 * * 1-5"
-    - cron: "17,47 14,15,16,17,18,19,20 * * 1-5"
+    # Pre-market starters — try to start the daily loop near market open.
+    # 13:30, 13:40, 13:50 UTC = 9:30, 9:40, 9:50 ET (market open is 9:30 ET DST).
+    # 14:00, 14:15, 14:30 UTC are additional fallbacks if all the early ones miss.
+    - cron: "30,40,50 13 * * 1-5"
+    - cron: "0,15,30,45 14 * * 1-5"
+    - cron: "0,30 15,16,17,18,19 * * 1-5"
 
-  # Manual trigger from GitHub Actions tab or `gh workflow run`
+  # Manual trigger
   workflow_dispatch:
 
-  # External cron trigger via GitHub API — POST to:
-  #   /repos/<owner>/<repo>/dispatches  with body: {"event_type":"run-bot"}
-  # Set up at cron-job.org with a GitHub PAT (workflow scope) for reliability.
+  # External / API trigger
   repository_dispatch:
     types: [run-bot]
+
+# Only one loop running at a time — if cron fires while another loop is active,
+# the new run queues. The active loop's market_is_open check at the top of each
+# iteration will make the next loop exit fast if the day is already done.
+concurrency:
+  group: trading-bot-loop
+  cancel-in-progress: false
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    timeout-minutes: 350   # ~5.8 hours, just under the 6-hour job limit
     permissions:
-      contents: write   # needed to commit state files back to the repo
+      contents: write
+    env:
+      ALPACA_API_KEY:    ${{ secrets.ALPACA_API_KEY }}
+      ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+      ALPACA_BASE_URL:   ${{ secrets.ALPACA_BASE_URL }}
 
     steps:
       - name: Checkout repo
@@ -40,17 +53,43 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run trading bot
-        env:
-          ALPACA_API_KEY:    ${{ secrets.ALPACA_API_KEY }}
-          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
-          ALPACA_BASE_URL:   ${{ secrets.ALPACA_BASE_URL }}
-        run: python bot.py
-
-      - name: Save state files back to repo
+      - name: Configure git for state-file commits
         run: |
           git config user.name  "Alpaca Trading Bot"
           git config user.email "bot@alpaca-challenge"
-          git add strategy.json performance.json trade_log.json heartbeat.json
-          git diff --staged --quiet || git commit -m "bot: state update $(date -u '+%Y-%m-%d %H:%M UTC')"
-          git push
+
+      - name: Loop bot every 25 min until market closes
+        run: |
+          # 13 iterations × 25 min ≈ 5.4 hours — covers the full 9:30-16:00 ET
+          # window with margin. Each iteration: pull, run bot, commit, push, sleep.
+          for i in $(seq 1 13); do
+            echo "::group::Iteration $i ($(date -u +%H:%M:%S) UTC)"
+
+            # Pull any state changes from other branches/dispatch runs (rare,
+            # but we want a clean working tree before committing).
+            git pull --rebase --autostash origin main || true
+
+            python bot.py || echo "bot.py exited non-zero — continuing the loop"
+
+            git add strategy.json performance.json trade_log.json heartbeat.json
+            if ! git diff --staged --quiet; then
+              git commit -m "bot: state update $(date -u '+%Y-%m-%d %H:%M UTC')"
+              git push || git pull --rebase origin main && git push
+            fi
+
+            # Stop the loop early if the market has closed in the meantime.
+            CLOSED=$(python -c "
+          import os, requests
+          h = {'APCA-API-KEY-ID': os.environ['ALPACA_API_KEY'],
+               'APCA-API-SECRET-KEY': os.environ['ALPACA_SECRET_KEY']}
+          r = requests.get(os.environ['ALPACA_BASE_URL']+'/v2/clock', headers=h, timeout=10).json()
+          print('1' if not r.get('is_open') else '0')
+          ")
+            if [ "$CLOSED" = "1" ] && [ $i -gt 2 ]; then
+              echo "Market closed — ending daily loop after iteration $i."
+              break
+            fi
+
+            echo "::endgroup::"
+            if [ $i -lt 13 ]; then sleep 1500; fi   # 25 min
+          done
