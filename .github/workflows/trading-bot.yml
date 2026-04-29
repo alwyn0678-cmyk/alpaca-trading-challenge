@@ -78,18 +78,15 @@ jobs:
             fi
 
             # Stop the loop early if the market has closed in the meantime.
-            CLOSED=$(python -c "
-          import os, requests
-          h = {'APCA-API-KEY-ID': os.environ['ALPACA_API_KEY'],
-               'APCA-API-SECRET-KEY': os.environ['ALPACA_SECRET_KEY']}
-          r = requests.get(os.environ['ALPACA_BASE_URL']+'/v2/clock', headers=h, timeout=10).json()
-          print('1' if not r.get('is_open') else '0')
-          ")
-            if [ "$CLOSED" = "1" ] && [ $i -gt 2 ]; then
+            # Use bot.py's own market_is_open() to stay consistent with how the
+            # bot decides whether to act. If the check itself errors, default
+            # to "keep looping" — never let a bad check kill the daily run.
+            CLOSED=$(python -c "import bot; print('1' if not bot.market_is_open() else '0')" 2>/dev/null || echo "0")
+            if [ "$CLOSED" = "1" ] && [ "$i" -gt 2 ]; then
               echo "Market closed — ending daily loop after iteration $i."
               break
             fi
 
             echo "::endgroup::"
-            if [ $i -lt 13 ]; then sleep 1500; fi   # 25 min
+            if [ "$i" -lt 13 ]; then sleep 1500; fi   # 25 min
           done
