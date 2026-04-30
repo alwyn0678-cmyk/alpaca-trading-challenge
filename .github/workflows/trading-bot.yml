@@ -2,17 +2,20 @@ name: Alpaca Trading Bot
 
 # Public repo = unlimited GitHub Actions minutes, so we run a single long-lived
 # job that loops the bot every ~25 min through market hours. Cron just needs
-# to fire ONCE per day to start the loop. Multiple cron entries below give
-# us many chances to catch the start-of-day fire.
+# to fire ONCE per day to start the loop, and the concurrency group below
+# guarantees only one loop ever runs at a time — extra fires are harmless.
+#
+# GitHub's scheduled cron is best-effort and frequently drops slots on public
+# repos. We saturate every 5 minutes through market hours (the minimum cron
+# interval GitHub allows) so the scheduler only needs to fire ONE of ~80
+# attempts per day. Times are offset off the :00 mark because GitHub docs
+# warn that on-the-hour slots are most likely to be delayed.
 
 on:
   schedule:
-    # Pre-market starters — try to start the daily loop near market open.
-    # 13:30, 13:40, 13:50 UTC = 9:30, 9:40, 9:50 ET (market open is 9:30 ET DST).
-    # 14:00, 14:15, 14:30 UTC are additional fallbacks if all the early ones miss.
-    - cron: "30,40,50 13 * * 1-5"
-    - cron: "0,15,30,45 14 * * 1-5"
-    - cron: "0,30 15,16,17,18,19 * * 1-5"
+    # Every 5 minutes from 13:33 UTC (9:33 ET, just after market open) through
+    # 19:58 UTC (3:58 PM ET). Offset 3,8,13,18,...,58 to avoid hour boundaries.
+    - cron: "3,8,13,18,23,28,33,38,43,48,53,58 13-19 * * 1-5"
 
   # Manual trigger
   workflow_dispatch:
