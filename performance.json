@@ -3,8 +3,8 @@
   "challenge_end": "2026-05-13",
   "account_start_equity": 50000.0,
   "start_equity": 10000.0,
-  "account_value": 10809.49,
-  "total_pnl": 809.49,
+  "account_value": 10823.34,
+  "total_pnl": 823.34,
   "wins": 1,
   "losses": 1,
   "daily_pnl": {
@@ -22,7 +22,7 @@
     "2026-04-28": 0.0,
     "2026-04-29": 56.88,
     "2026-04-30": 262.74,
-    "2026-05-01": 517.6
+    "2026-05-01": 531.45
   },
   "peak_equity": 50843.91
 }
