@@ -12,3 +12,4 @@
 {"ts": "2026-04-29T04:34:03.470402+00:00", "action": "BACKFILL_NON_FILL", "symbol": "XLF", "note": "XLF pullback limit @ $51.1 on 2026-04-28 expired without filling \u2014 phantom ENTRY entry retroactively reconciled"}
 {"action": "ENTRY", "symbol": "AAPL", "qty": 33, "price": 268.715, "stop": 257.13, "target_1": 280.93, "target_2": 294.31, "setup_type": "pullback_20ma", "rr": 3.59, "order_id": "9cca7f74-a6f4-4fd9-bfdf-b34f50e300b5", "regime": "trending_up", "timestamp": "2026-04-29T16:10:13.288389+00:00"}
 {"action": "ENTRY", "symbol": "UBER", "qty": 120, "price": 74.11, "stop": 73.01, "target_1": 78.21, "target_2": 81.94, "setup_type": "pullback_20ma", "rr": 3.6, "order_id": "4a11c58b-4f8d-4da5-bf72-a5f58b54073d", "regime": "trending_up", "timestamp": "2026-04-30T15:34:19.211974+00:00"}
+{"action": "TARGET_1", "symbol": "AAPL", "qty": 16, "price": 283.99, "entry": 268.715, "pnl": 244.4, "timestamp": "2026-05-01T14:35:28.405667+00:00"}
