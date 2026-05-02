@@ -85,7 +85,7 @@ jobs:
             # bot decides whether to act. If the check itself errors, default
             # to "keep looping" — never let a bad check kill the daily run.
             CLOSED=$(python -c "import bot; print('1' if not bot.market_is_open() else '0')" 2>/dev/null || echo "0")
-            if [ "$CLOSED" = "1" ] && [ "$i" -gt 2 ]; then
+            if [ "$CLOSED" = "1" ]; then
               echo "Market closed — ending daily loop after iteration $i."
               break
             fi
