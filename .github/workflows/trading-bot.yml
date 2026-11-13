@@ -12,17 +12,8 @@ name: Alpaca Trading Bot
 # warn that on-the-hour slots are most likely to be delayed.
 
 on:
-  schedule:
-    # Every 5 minutes from 13:33 UTC (9:33 ET, just after market open) through
-    # 19:58 UTC (3:58 PM ET). Offset 3,8,13,18,...,58 to avoid hour boundaries.
-    - cron: "3,8,13,18,23,28,33,38,43,48,53,58 13-19 * * 1-5"
-
   # Manual trigger
   workflow_dispatch:
-
-  # External / API trigger
-  repository_dispatch:
-    types: [run-bot]
 
 # Only one loop running at a time — if cron fires while another loop is active,
 # the new run queues. The active loop's market_is_open check at the top of each
