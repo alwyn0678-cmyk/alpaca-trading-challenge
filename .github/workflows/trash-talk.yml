@@ -1,10 +1,6 @@
 name: Daily Trash Talk Email
 
 on:
-  schedule:
-    # 20:30 UTC = 4:30 PM ET (UTC-4 DST) — fires Monday–Friday right after market close
-    - cron: "30 20 * * 1-5"
-
   # Trigger manually from the GitHub Actions tab to test any time
   workflow_dispatch:
 
